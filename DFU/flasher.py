@@ -96,6 +96,19 @@ def subprocess_creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
 
+def _is_expected_leave_status_error(output: str) -> bool:
+    """Return whether dfu-util failed only because leave disconnected the device."""
+    normalized = output.casefold()
+    return all(
+        marker in normalized
+        for marker in (
+            "file downloaded successfully",
+            "submitting leave request",
+            "error during download get_status",
+        )
+    )
+
+
 def flash_firmware(
     device_id: str,
     serial_number: str,
@@ -144,7 +157,9 @@ def flash_firmware(
 
     return_code = process.wait()
     output = "\n".join(output_lines)
-    if return_code != 0:
+    if return_code != 0 and not _is_expected_leave_status_error(output):
         detail = f"\n\n{output}" if output else ""
         raise DfuError(f"dfu-util 刷写失败，退出码 {return_code}。{detail}")
+    if return_code != 0 and on_output is not None:
+        on_output("leave 后设备未响应最终状态查询；固件数据已写入完成。")
     return output

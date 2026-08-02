@@ -78,6 +78,57 @@ class FlasherTests(unittest.TestCase):
         self.assertEqual(received, ["line one", "line two"])
         self.assertEqual(output, "line one\nline two")
 
+    def test_allows_get_status_error_after_successful_download_and_leave(self) -> None:
+        process = MagicMock()
+        process.stdout = iter(
+            (
+                "File downloaded successfully\n",
+                "Warning: Invalid DFU suffix signature\n",
+                "Submitting leave request...\n",
+                "Error during download get_status\n",
+            )
+        )
+        process.wait.return_value = 74
+        received: list[str] = []
+        with (
+            patch(
+                "DFU.flasher.build_flash_command",
+                return_value=[str(Path("C:/DFU/dfu-util.exe"))],
+            ),
+            patch("DFU.flasher.subprocess.Popen", return_value=process),
+        ):
+            output = flash_firmware(
+                "0483:DF11",
+                "ABC123",
+                Path("maimai_controller_H503_20260802_120000.bin"),
+                on_output=received.append,
+            )
+        self.assertIn("Invalid DFU suffix signature", output)
+        self.assertIn("固件数据已写入完成", received[-1])
+
+    def test_rejects_get_status_error_without_completed_download(self) -> None:
+        process = MagicMock()
+        process.stdout = iter(
+            (
+                "Submitting leave request...\n",
+                "Error during download get_status\n",
+            )
+        )
+        process.wait.return_value = 74
+        with (
+            patch(
+                "DFU.flasher.build_flash_command",
+                return_value=[str(Path("C:/DFU/dfu-util.exe"))],
+            ),
+            patch("DFU.flasher.subprocess.Popen", return_value=process),
+            self.assertRaises(DfuError),
+        ):
+            flash_firmware(
+                "0483:DF11",
+                "ABC123",
+                Path("maimai_controller_H503_20260802_120000.bin"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

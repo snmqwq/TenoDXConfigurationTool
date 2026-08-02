@@ -23,6 +23,11 @@ from .magic import (
     send_enter_dfu,
     wait_for_magic_return,
 )
+from .usb_reenumeration import (
+    UsbReenumerationError,
+    ensure_usb_reenumeration_available,
+    remove_dfu_device_and_rescan,
+)
 
 DEFAULT_DEVICE_ID = "0483:DF11"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -82,10 +87,11 @@ def resolve_firmware(specified: Path | None) -> Path:
 
 
 def run_dfu_update(args: argparse.Namespace) -> int:
+    ensure_usb_reenumeration_available()
     firmware = resolve_firmware(args.firmware)
     print(f"固件: {firmware.name}")
 
-    print("[1/5] 正在查找并验证 TenoDX Aime/Magic 串口...")
+    print("[1/6] 正在查找并验证 TenoDX Aime/Magic 串口...")
     magic_ports = discover_magic_ports(args.port)
     if not magic_ports:
         target = f" {args.port}" if args.port else ""
@@ -97,11 +103,11 @@ def run_dfu_update(args: argparse.Namespace) -> int:
     existing_dfu, _ = list_dfu_devices(args.device_id)
     previous_serials = {device.serial_number for device in existing_dfu}
 
-    print("[2/5] 正在发送进入 DFU 命令...")
+    print("[2/6] 正在发送进入 DFU 命令...")
     send_enter_dfu(selected_magic)
     print("设备已接受 DFU 命令，应用串口已释放。")
 
-    print(f"[3/5] 正在等待新的 {args.device_id} DFU 设备...")
+    print(f"[3/6] 正在等待新的 {args.device_id} DFU 设备...")
     new_devices = wait_for_new_dfu_devices(
         args.device_id,
         previous_serials,
@@ -110,7 +116,7 @@ def run_dfu_update(args: argparse.Namespace) -> int:
     selected_dfu = select_dfu_device(new_devices)
     print(f"DFU 设备: {selected_dfu.device_id}  serial={selected_dfu.serial_number}")
 
-    print("[4/5] 正在刷写固件...")
+    print("[4/6] 正在刷写固件...")
     flash_firmware(
         device_id=selected_dfu.device_id,
         serial_number=selected_dfu.serial_number,
@@ -118,7 +124,15 @@ def run_dfu_update(args: argparse.Namespace) -> int:
         on_output=lambda line: print(f"[dfu-util] {line}"),
     )
 
-    print("[5/5] 正在等待应用设备重新枚举并验证 Magic 协议...")
+    print("[5/6] 正在卸载 DFU 设备并重新枚举 USB 设备...")
+    remove_dfu_device_and_rescan(
+        device_id=selected_dfu.device_id,
+        serial_number=selected_dfu.serial_number,
+        usb_path=selected_dfu.usb_path,
+        on_output=lambda line: print(f"[PnP] {line}"),
+    )
+
+    print("[6/6] 正在等待应用设备重新枚举并验证 Magic 协议...")
     returned = wait_for_magic_return(
         selected_magic,
         other_magic,
@@ -162,7 +176,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("超时时间必须大于 0。")
     try:
         return args.handler(args)
-    except (CliError, DfuError, FirmwareSelectionError, MagicError) as error:
+    except (
+        CliError,
+        DfuError,
+        FirmwareSelectionError,
+        MagicError,
+        UsbReenumerationError,
+    ) as error:
         print(f"错误: {error}")
         return 1
     except KeyboardInterrupt:

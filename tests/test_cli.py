@@ -30,20 +30,24 @@ class DfuWorkflowTests(unittest.TestCase):
         returned = MagicPort(device="COM7", usb_serial="APP-UID")
         with (
             patch("tenodx_config.cli.resolve_firmware", return_value=firmware),
+            patch("tenodx_config.cli.ensure_usb_reenumeration_available") as preflight,
             patch("tenodx_config.cli.discover_magic_ports", return_value=[magic]),
             patch("tenodx_config.cli.list_dfu_devices", return_value=([], "")),
             patch("tenodx_config.cli.send_enter_dfu") as enter,
             patch("tenodx_config.cli.wait_for_new_dfu_devices", return_value=[dfu]),
             patch("tenodx_config.cli.select_dfu_device", return_value=dfu),
             patch("tenodx_config.cli.flash_firmware") as flash,
+            patch("tenodx_config.cli.remove_dfu_device_and_rescan") as remove,
             patch("tenodx_config.cli.wait_for_magic_return", return_value=returned),
             patch("builtins.print"),
         ):
             result = run_dfu_update(args)
 
         self.assertEqual(result, 0)
+        preflight.assert_called_once_with()
         enter.assert_called_once_with(magic)
         flash.assert_called_once()
+        remove.assert_called_once()
         self.assertEqual(
             flash.call_args.kwargs,
             {
@@ -51,6 +55,15 @@ class DfuWorkflowTests(unittest.TestCase):
                 "serial_number": "DFU-UID",
                 "firmware_path": firmware,
                 "on_output": flash.call_args.kwargs["on_output"],
+            },
+        )
+        self.assertEqual(
+            remove.call_args.kwargs,
+            {
+                "device_id": "0483:DF11",
+                "serial_number": "DFU-UID",
+                "usb_path": "2-2",
+                "on_output": remove.call_args.kwargs["on_output"],
             },
         )
 

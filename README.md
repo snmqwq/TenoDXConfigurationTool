@@ -12,6 +12,7 @@ TenoDX 主控的命令行配置程序。当前版本实现 STM32H503 固件更�
   -> 等待新的 0483:DF11，并取得 USB 序列号
   -> 把 VID:PID、USB 序列号、固件路径传给 DFU 组件
   -> dfu-util 写入 0x08000000 并 leave
+  -> 卸载所选 DFU 设备节点并扫描 USB 设备变化
   -> 重新验证应用设备的 Magic 协议
   -> 关闭并释放串口
 ```
@@ -24,6 +25,7 @@ TenoDX 主控的命令行配置程序。当前版本实现 STM32H503 固件更�
 - Windows x64
 - Python 3.10 或更高版本
 - STM32 DFU 已绑定 WinUSB、libusbK 或兼容驱动
+- 以管理员权限运行，以便使用 Windows PnPUtil 卸载 DFU 设备节点
 
 安装 Python 依赖：
 
@@ -32,7 +34,9 @@ python -m pip install -r requirements.txt
 ```
 
 项目随附 `dfu-util 0.11` 和 `libusb-1.0.dll`，不依赖 STM32CubeProgrammer 或
-STM32CubeIDE。
+STM32CubeIDE。DFU 刷写后，应用端使用 Windows 自带的 `pnputil.exe` 精确卸载所选
+DFU 节点并同步扫描设备变化；随后仍以应用设备重新枚举且通过 Magic 验证作为成功
+条件。
 
 ## 固件目录
 
