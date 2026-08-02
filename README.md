@@ -11,7 +11,8 @@ TenoDX 主控的命令行配置程序。当前版本实现 STM32H503 固件更�
   -> 发送 Magic ENTER_DFU 命令
   -> 等待新的 0483:DF11，并取得 USB 序列号
   -> 把 VID:PID、USB 序列号、固件路径传给 DFU 组件
-  -> dfu-util 写入 0x08000000 并 leave
+  -> dfu-util 写入 0x08000000
+  -> 默认等待 0.5 秒，再单独提交 leave
   -> 重新验证应用设备的 Magic 协议
   -> 关闭并释放串口
 ```
@@ -64,6 +65,15 @@ python main.py dfu --port COM7
 ```powershell
 python main.py dfu --firmware firmware\maimai_controller_H503_20260802_220000.bin
 ```
+
+调整刷写完成到退出 DFU 之间的等待时间（单位：秒）：
+
+```powershell
+python main.py dfu --leave-delay 1.0
+```
+
+默认等待时间为 0.5 秒。写入步骤必须成功后才会等待并提交 `leave`；应用端随后仍会
+等待设备重新枚举并重新验证 Magic 协议，以此判定完整更新流程是否成功。
 
 查看参数：
 

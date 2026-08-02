@@ -18,6 +18,7 @@ class DfuWorkflowTests(unittest.TestCase):
             device_id="0483:DF11",
             dfu_timeout=20.0,
             app_timeout=30.0,
+            leave_delay=0.5,
         )
         firmware = Path("firmware/maimai_controller_H503_20260802_120000.bin")
         magic = MagicPort(device="COM7", usb_serial="APP-UID")
@@ -51,6 +52,7 @@ class DfuWorkflowTests(unittest.TestCase):
                 "serial_number": "DFU-UID",
                 "firmware_path": firmware,
                 "on_output": flash.call_args.kwargs["on_output"],
+                "leave_delay": 0.5,
             },
         )
 
