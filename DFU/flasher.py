@@ -5,12 +5,10 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-import time
 from collections.abc import Callable
 from pathlib import Path
 
 DEFAULT_FLASH_ADDRESS = 0x08000000
-DEFAULT_LEAVE_DELAY = 0.5
 FIRMWARE_NAME_RE = re.compile(
     r"^maimai_controller_H503_(?P<date>\d{8})_(?P<time>\d{6})\.bin$"
 )
@@ -88,27 +86,9 @@ def build_flash_command(
         "-a",
         "0",
         "-s",
-        f"0x{flash_address:08X}",
+        f"0x{flash_address:08X}:leave",
         "-D",
         str(firmware),
-    ]
-
-
-def build_leave_command(device_id: str, serial_number: str) -> list[str]:
-    """Build a serial-scoped DfuSe leave command."""
-    executable = get_dfu_util_path()
-    device = validate_device_id(device_id)
-    serial = validate_serial_number(serial_number)
-    return [
-        str(executable),
-        "-d",
-        device,
-        "-S",
-        serial,
-        "-a",
-        "0",
-        "-s",
-        ":leave",
     ]
 
 
@@ -116,10 +96,19 @@ def subprocess_creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
 
-def _run_dfu_util(
-    command: list[str],
-    on_output: Callable[[str], None] | None,
-) -> tuple[int, str]:
+def flash_firmware(
+    device_id: str,
+    serial_number: str,
+    firmware_path: Path | str,
+    on_output: Callable[[str], None] | None = None,
+) -> str:
+    """
+    Flash one selected DFU device and ask it to leave DFU mode.
+
+    Device discovery, firmware selection, entering DFU, and post-flash Magic
+    verification intentionally belong to the calling application.
+    """
+    command = build_flash_command(device_id, serial_number, firmware_path)
     executable_dir = Path(command[0]).parent
     try:
         process = subprocess.Popen(
@@ -153,46 +142,9 @@ def _run_dfu_util(
         process.wait()
         raise
 
-    return process.wait(), "\n".join(output_lines)
-
-
-def _is_expected_leave_disconnect(output: str) -> bool:
-    normalized = output.casefold()
-    return (
-        "submitting leave request" in normalized
-        and "error during download get_status" in normalized
-    )
-
-
-def flash_firmware(
-    device_id: str,
-    serial_number: str,
-    firmware_path: Path | str,
-    on_output: Callable[[str], None] | None = None,
-    leave_delay: float = DEFAULT_LEAVE_DELAY,
-) -> str:
-    """
-    Flash one selected DFU device, wait, and then ask it to leave DFU mode.
-
-    Device discovery, firmware selection, entering DFU, and post-flash Magic
-    verification intentionally belong to the calling application.
-    """
-    if leave_delay < 0:
-        raise DfuError("退出 DFU 前的等待时间不能小于 0。")
-
-    command = build_flash_command(device_id, serial_number, firmware_path)
-    leave_command = build_leave_command(device_id, serial_number)
-    return_code, output = _run_dfu_util(command, on_output)
+    return_code = process.wait()
+    output = "\n".join(output_lines)
     if return_code != 0:
         detail = f"\n\n{output}" if output else ""
         raise DfuError(f"dfu-util 刷写失败，退出码 {return_code}。{detail}")
-    time.sleep(leave_delay)
-
-    leave_return_code, leave_output = _run_dfu_util(leave_command, on_output)
-    if leave_return_code != 0 and not _is_expected_leave_disconnect(leave_output):
-        detail = f"\n\n{leave_output}" if leave_output else ""
-        raise DfuError(f"dfu-util 退出 DFU 失败，退出码 {leave_return_code}。{detail}")
-    if leave_return_code != 0 and on_output is not None:
-        on_output("设备在 leave 状态查询完成前断开，继续等待应用设备重新枚举。")
-
-    return "\n".join(part for part in (output, leave_output) if part)
+    return output

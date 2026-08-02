@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
 
-from DFU import DEFAULT_LEAVE_DELAY, DfuError, flash_firmware
+from DFU import DfuError, flash_firmware
 
 from .dfu_devices import list_dfu_devices, select_dfu_device, wait_for_new_dfu_devices
 from .firmware import (
@@ -116,7 +116,6 @@ def run_dfu_update(args: argparse.Namespace) -> int:
         serial_number=selected_dfu.serial_number,
         firmware_path=firmware,
         on_output=lambda line: print(f"[dfu-util] {line}"),
-        leave_delay=args.leave_delay,
     )
 
     print("[5/5] 正在等待应用设备重新枚举并验证 Magic 协议...")
@@ -149,12 +148,6 @@ def build_parser() -> argparse.ArgumentParser:
     dfu.add_argument(
         "--app-timeout", type=float, default=30.0, help="等待应用重新枚举秒数，默认 30"
     )
-    dfu.add_argument(
-        "--leave-delay",
-        type=float,
-        default=DEFAULT_LEAVE_DELAY,
-        help="刷写完成后、退出 DFU 前的等待秒数，默认 0.5",
-    )
     dfu.set_defaults(handler=run_dfu_update)
     return parser
 
@@ -167,8 +160,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if getattr(args, "dfu_timeout", 1.0) <= 0 or getattr(args, "app_timeout", 1.0) <= 0:
         parser.error("超时时间必须大于 0。")
-    if getattr(args, "leave_delay", 0.0) < 0:
-        parser.error("退出 DFU 前的等待时间不能小于 0。")
     try:
         return args.handler(args)
     except (CliError, DfuError, FirmwareSelectionError, MagicError) as error:

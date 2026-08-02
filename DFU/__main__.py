@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .flasher import DEFAULT_LEAVE_DELAY, DfuError, flash_firmware
+from .flasher import DfuError, flash_firmware
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,12 +19,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--firmware", required=True, type=Path, help="带时间戳的 BIN 固件路径"
     )
-    parser.add_argument(
-        "--leave-delay",
-        type=float,
-        default=DEFAULT_LEAVE_DELAY,
-        help="刷写完成后、退出 DFU 前的等待秒数，默认 0.5",
-    )
     return parser
 
 
@@ -36,7 +30,6 @@ def main(argv: list[str] | None = None) -> int:
             serial_number=args.serial,
             firmware_path=args.firmware,
             on_output=print,
-            leave_delay=args.leave_delay,
         )
     except DfuError as error:
         print(f"刷写失败: {error}")
