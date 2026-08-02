@@ -1,0 +1,8 @@
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "N", "DTZ", "PYI"]
+
+[tool.ruff.lint.per-file-ignores]
+"DFU/*.py" = ["N999"]
