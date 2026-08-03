@@ -156,6 +156,20 @@ def run_live_test(_args: argparse.Namespace) -> int:
         raise CliError(str(error)) from error
 
 
+def run_device_config(_args: argparse.Namespace) -> int:
+    """Launch the optional device configuration UI."""
+
+    try:
+        from .device_config_ui import DeviceConfigUiError, launch_device_config
+    except ImportError as error:
+        raise CliError(f"无法加载设备配置界面：{error}") from error
+
+    try:
+        return launch_device_config()
+    except DeviceConfigUiError as error:
+        raise CliError(str(error)) from error
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TenoDX 设备命令行配置程序")
     subparsers = parser.add_subparsers(dest="command")
@@ -182,6 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
         "test", help="打开 Touch、主按键、Aime 和 Mai2LED 综合测试界面"
     )
     live_test.set_defaults(handler=run_live_test)
+
+    device_config = subparsers.add_parser(
+        "config", help="打开 Touch 映射、LED 和按键配置界面"
+    )
+    device_config.set_defaults(handler=run_device_config)
     return parser
 
 

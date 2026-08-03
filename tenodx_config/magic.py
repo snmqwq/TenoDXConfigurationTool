@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - exercised by CLI dependency error path
 
 MAGIC_SEQUENCE = bytes([0x91, 0x3E, 0xED, 0x20, 0x7C, 0x99, 0x58, 0xAC])
 MAGIC_RESPONSE_SYNC = 0xAC
-MAX_PAYLOAD = 192
+MAX_PAYLOAD = 248
 LIGHT_MODULE = 0x20
 INFO_COMMAND = 0x05
 LIGHT_INFO_PARAMS = frozenset((0x01, 0x02))

@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tenodx_config.cli import build_parser, main, run_dfu_update, run_live_test
+from tenodx_config.cli import (
+    build_parser,
+    main,
+    run_device_config,
+    run_dfu_update,
+    run_live_test,
+)
 from tenodx_config.dfu_devices import DfuDevice
 from tenodx_config.magic import MagicPort
 
@@ -119,6 +125,49 @@ class LiveTestCommandTests(unittest.TestCase):
 
         self.assertIs(args.handler, run_dfu_update)
         self.assertIs(build_parser().parse_args(["test"]).handler, run_live_test)
+
+
+class DeviceConfigCommandTests(unittest.TestCase):
+    @staticmethod
+    def fake_ui_module(
+        launcher: Mock,
+    ) -> tuple[types.ModuleType, type[RuntimeError]]:
+        class FakeDeviceConfigUiError(RuntimeError):
+            pass
+
+        module = types.ModuleType("tenodx_config.device_config_ui")
+        module.DeviceConfigUiError = FakeDeviceConfigUiError
+        module.launch_device_config = launcher
+        return module, FakeDeviceConfigUiError
+
+    def test_config_command_launches_ui_without_hardware(self) -> None:
+        launcher = Mock(return_value=0)
+        module, _ = self.fake_ui_module(launcher)
+
+        with patch.dict(sys.modules, {module.__name__: module}):
+            result = main(["config"])
+
+        self.assertEqual(result, 0)
+        launcher.assert_called_once_with()
+
+    def test_config_ui_error_is_reported_as_cli_error(self) -> None:
+        launcher = Mock()
+        module, ui_error = self.fake_ui_module(launcher)
+        launcher.side_effect = ui_error("配置界面初始化失败")
+
+        with (
+            patch.dict(sys.modules, {module.__name__: module}),
+            patch("builtins.print") as print_mock,
+        ):
+            result = main(["config"])
+
+        self.assertEqual(result, 1)
+        print_mock.assert_called_once_with("错误: 配置界面初始化失败")
+
+    def test_config_handler_is_bound(self) -> None:
+        args = build_parser().parse_args(["config"])
+
+        self.assertIs(args.handler, run_device_config)
 
 
 if __name__ == "__main__":
