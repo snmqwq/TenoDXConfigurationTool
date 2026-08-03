@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from tenodx_config.cli import run_dfu_update
+from tenodx_config.cli import build_parser, main, run_dfu_update, run_live_test
 from tenodx_config.dfu_devices import DfuDevice
 from tenodx_config.magic import MagicPort
 
@@ -66,6 +68,57 @@ class DfuWorkflowTests(unittest.TestCase):
                 "on_output": remove.call_args.kwargs["on_output"],
             },
         )
+
+
+class LiveTestCommandTests(unittest.TestCase):
+    @staticmethod
+    def fake_ui_module(
+        launcher: Mock,
+    ) -> tuple[types.ModuleType, type[RuntimeError]]:
+        class FakeControllerTestError(RuntimeError):
+            pass
+
+        module = types.ModuleType("tenodx_config.controller_test_ui")
+        module.ControllerTestError = FakeControllerTestError
+        module.launch_controller_test = launcher
+        return module, FakeControllerTestError
+
+    def test_test_command_launches_ui_without_hardware(self) -> None:
+        launcher = Mock(return_value=0)
+        module, _ = self.fake_ui_module(launcher)
+
+        with patch.dict(sys.modules, {module.__name__: module}):
+            result = main(["test"])
+
+        self.assertEqual(result, 0)
+        launcher.assert_called_once_with()
+
+    def test_ui_error_is_reported_as_cli_error(self) -> None:
+        launcher = Mock()
+        module, ui_error = self.fake_ui_module(launcher)
+        launcher.side_effect = ui_error("测试界面初始化失败")
+
+        with (
+            patch.dict(sys.modules, {module.__name__: module}),
+            patch("builtins.print") as print_mock,
+        ):
+            result = main(["test"])
+
+        self.assertEqual(result, 1)
+        print_mock.assert_called_once_with("错误: 测试界面初始化失败")
+
+    def test_no_command_still_prints_help_and_succeeds(self) -> None:
+        with patch("argparse.ArgumentParser.print_help") as print_help:
+            result = main([])
+
+        self.assertEqual(result, 0)
+        print_help.assert_called_once_with()
+
+    def test_dfu_handler_binding_is_unchanged(self) -> None:
+        args = build_parser().parse_args(["dfu"])
+
+        self.assertIs(args.handler, run_dfu_update)
+        self.assertIs(build_parser().parse_args(["test"]).handler, run_live_test)
 
 
 if __name__ == "__main__":

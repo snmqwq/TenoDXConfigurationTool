@@ -1,7 +1,7 @@
 # TenoDX Configuration Tool
 
-TenoDX 主控的命令行配置程序。当前版本实现 STM32H503 固件更新，后续配置功能可在
-应用层继续扩展。
+TenoDX 主控的配置程序。当前提供 STM32H503 固件更新，以及 Touch、主按键、
+Aime 和 Mai2LED 的协议测试。
 
 ## DFU 更新流程
 
@@ -51,6 +51,27 @@ maimai_controller_H503_YYYYMMDD_HHMMSS.bin
 
 ## 使用
 
+打开实时输入界面：
+
+```powershell
+python main.py test
+```
+
+所有测试位于同一个窗口，并且每个设备都必须由用户明确选择；即使只发现一个候选设备，
+也不会自动选中。设备标签保留系统报告的设备描述、VID、PID 等身份信息。Touch、LED、
+Aime 三路串口不能重复选择，各模块独立连接和断开，一个模块通信失败不会主动断开其他模块。
+
+- Touch / BTN：只显示当前触发的 34 个触摸区域与 `BTN1`-`BTN8`；1P、2P 键位映射到
+  同一组主按键。连接 Touch 后只发送 `{RSET}` 和 `{STAT}`。
+- Aime：验证 Aime 协议，显示固件/硬件版本、当前有无卡、20 位 Aime 协议卡号和
+  Block 2 原始 16 字节。Block 2 不是合法 BCD 时仍保留原始数据，但将卡号标为无法解析。
+  此功能只读卡，不写卡，也不执行 Magic 命令或 PN532 底层诊断。
+- Mai2LED：验证 `15070-04` 协议，提供自定义 RGB 常亮、RGBW 循环、`BTN1`-`BTN8`
+  逐灯和目标色淡入淡出。循环持续到手动停止；停止、断开或关闭窗口时会请求全灭。
+
+界面不包含测试引导、历史记录、通过/失败判定，也不会发送触摸灵敏度调整命令。
+Mai2LED 返回 ACK 只代表协议通信成功，不能代替对灯珠是否实际点亮的观察。
+
 自动探测兼容的 Aime/Magic 串口：
 
 ```powershell
@@ -82,7 +103,8 @@ python main.py dfu --help
 ```text
 TenoDXConfigurationTool/
 ├─ main.py
-├─ tenodx_config/          应用端：固件选择、Magic、DFU 发现与流程编排
+├─ tenodx_config/          应用端：配置流程、设备协议与综合测试界面
+├─ images/                 触摸区域与 BTN1-BTN8 实时显示素材
 ├─ DFU/                    独立刷写组件及 Windows x64 dfu-util
 ├─ firmware/               时间戳 BIN 固件目录（初始为空）
 ├─ tests/

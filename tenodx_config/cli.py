@@ -142,6 +142,20 @@ def run_dfu_update(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_live_test(_args: argparse.Namespace) -> int:
+    """Launch the optional real-time controller test UI."""
+
+    try:
+        from .controller_test_ui import ControllerTestError, launch_controller_test
+    except ImportError as error:
+        raise CliError(f"无法加载实时测试界面：{error}") from error
+
+    try:
+        return launch_controller_test()
+    except ControllerTestError as error:
+        raise CliError(str(error)) from error
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TenoDX 设备命令行配置程序")
     subparsers = parser.add_subparsers(dest="command")
@@ -163,6 +177,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--app-timeout", type=float, default=30.0, help="等待应用重新枚举秒数，默认 30"
     )
     dfu.set_defaults(handler=run_dfu_update)
+
+    live_test = subparsers.add_parser(
+        "test", help="打开 Touch、主按键、Aime 和 Mai2LED 综合测试界面"
+    )
+    live_test.set_defaults(handler=run_live_test)
     return parser
 
 
