@@ -481,12 +481,6 @@ class ControllerTestWindow:
         ttk.Label(left, textvariable=self.button_state_var).grid(
             row=2, column=0, pady=(5, 0), sticky="w"
         )
-        ttk.Label(
-            left,
-            text="仅显示当前触发状态；1P 与 2P 键位均映射到 BTN1–BTN8。",
-            foreground="#666666",
-        ).grid(row=3, column=0, pady=(8, 0), sticky="w")
-
         right = ttk.Frame(content)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
