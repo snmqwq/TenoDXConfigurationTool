@@ -11,6 +11,7 @@ from unittest.mock import patch
 from tenodx_config.device_config import (
     LAYOUT_1P,
     LAYOUT_2P,
+    TOUCH_ZONE_NAMES,
     DeviceConfigSnapshot,
     KeyboardConfig,
     LedConfig,
@@ -19,7 +20,6 @@ from tenodx_config.device_config import (
 )
 from tenodx_config.device_config_ui import (
     DeviceConfigWindow,
-    format_touch_zones,
     serial_port_label,
 )
 
@@ -27,7 +27,7 @@ from tenodx_config.device_config_ui import (
 def make_touch_config() -> TouchConfig:
     return TouchConfig(
         entries=tuple(
-            TouchMapEntry(zone_mask=1 << channel, block="ABCDE"[channel % 5])
+            TouchMapEntry(zone=TOUCH_ZONE_NAMES[channel])
             for channel in range(34)
         )
     )
@@ -148,11 +148,6 @@ class DeviceConfigUiHelpersTests(unittest.TestCase):
         self.assertIn("VID 未报告", missing)
         self.assertIn("PID 未报告", missing)
 
-    def test_touch_zone_formatter_supports_multiple_and_none(self) -> None:
-        self.assertEqual(format_touch_zones(0), "none")
-        self.assertEqual(format_touch_zones((1 << 0) | (1 << 17)), "A1, C2")
-
-
 class DeviceConfigWindowTests(unittest.TestCase):
     def _root(self) -> tk.Tk:
         try:
@@ -222,7 +217,9 @@ class DeviceConfigWindowTests(unittest.TestCase):
             else:
                 root.destroy()
 
-    def test_touch_is_one_batch_led_saves_and_unknown_ek_is_preserved(self) -> None:
+    def test_touch_allows_shared_region_led_saves_and_unknown_ek_is_preserved(
+        self,
+    ) -> None:
         root = self._root()
         controllers: list[FakeController] = []
         app: DeviceConfigWindow | None = None
@@ -244,17 +241,20 @@ class DeviceConfigWindowTests(unittest.TestCase):
             wait_for_tk(root, lambda: app.connected)
             controller = controllers[0]
 
-            # Change exactly one physical channel.  The row itself visibly carries
-            # a marker, and one apply action becomes one batch-controller call.
+            # Each physical channel selects exactly one region, while different
+            # channels may select the same region in one batch update.
             app.touch_tree.selection_set("0")
             app._load_touch_editor(0)
-            for variable in app.touch_zone_vars.values():
-                variable.set(False)
-            app.touch_zone_vars["A2"].set(True)
-            app.touch_zone_vars["C2"].set(True)
-            app.touch_block_var.set("D")
+            app.touch_zone_var.set("C2")
             app._commit_touch_editor()
             self.assertEqual(app.touch_tree.item("0", "text"), "0 *")
+            self.assertEqual(app.touch_block_var.get(), "C")
+
+            app.touch_tree.selection_set("1")
+            app._load_touch_editor(1)
+            app.touch_zone_var.set("C2")
+            app._commit_touch_editor()
+            self.assertEqual(app.touch_tree.item("1", "text"), "1 *")
             self.assertEqual(app.touch_dirty_var.get(), "有未应用修改")
             self.assertFalse(any(call[0] == "apply_touch" for call in controller.calls))
 
@@ -265,13 +265,12 @@ class DeviceConfigWindowTests(unittest.TestCase):
             ]
             self.assertEqual(len(touch_calls), 1)
             changes = touch_calls[0][1]
-            self.assertEqual(set(changes), {0})
-            self.assertEqual(
-                changes[0],
-                TouchMapEntry(zone_mask=(1 << 1) | (1 << 17), block="D"),
-            )
+            self.assertEqual(set(changes), {0, 1})
+            self.assertEqual(changes[0], TouchMapEntry("C2"))
+            self.assertEqual(changes[1], TouchMapEntry("C2"))
             self.assertNotIn(("save_touch",), controller.calls)
             self.assertEqual(app.touch_tree.item("0", "text"), "0")
+            self.assertEqual(app.touch_tree.item("1", "text"), "1")
 
             app.led_per_bit_var.set("4")
             app.led_rainbow_var.set(True)
@@ -362,7 +361,7 @@ class DeviceConfigWindowTests(unittest.TestCase):
             self.assertEqual(app.led_dirty_var.get(), "有未应用修改")
 
             controllers[0].touch = TouchConfig(
-                tuple(TouchMapEntry(zone_mask=0, block="C") for _index in range(34))
+                tuple(TouchMapEntry(zone="C1") for _index in range(34))
             )
             with patch(
                 "tenodx_config.device_config_ui.messagebox.askyesno",
@@ -370,7 +369,7 @@ class DeviceConfigWindowTests(unittest.TestCase):
             ):
                 app.read_page("touch")
             wait_for_tk(root, lambda: not app.operation_pending)
-            self.assertEqual(app.touch_draft[0], TouchMapEntry(0, "C"))
+            self.assertEqual(app.touch_draft[0], TouchMapEntry("C1"))
             self.assertEqual(app.led_per_bit_var.get(), "3")
             self.assertEqual(app.led_dirty_var.get(), "有未应用修改")
         finally:

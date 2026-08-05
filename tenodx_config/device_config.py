@@ -7,7 +7,7 @@ from the Tk UI so configuration changes can be tested without hardware.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Self
@@ -32,11 +32,10 @@ KEYBOARD_LAYOUT_PARAM = 0x81
 SAVE_ALL_PARAM = 0x00
 
 TOUCH_CHANNEL_COUNT = 34
-TOUCH_ENTRY_LENGTH = 6
+TOUCH_ENTRY_LENGTH = 2
 TOUCH_MAPPING_LENGTH = TOUCH_CHANNEL_COUNT * TOUCH_ENTRY_LENGTH
 TOUCH_BATCH_RECORD_LENGTH = TOUCH_ENTRY_LENGTH + 1
-TOUCH_VALID_MASK = (1 << 34) - 1
-TOUCH_BLOCKS = ("A", "B", "C", "D", "E")
+TOUCH_PAYLOAD_VERSION = 2
 
 LAYOUT_1P = 0
 LAYOUT_2P = 1
@@ -49,7 +48,9 @@ TOUCH_ZONE_NAMES = (
     *(f"D{number}" for number in range(1, 9)),
     *(f"E{number}" for number in range(1, 9)),
 )
-_TOUCH_ZONE_BITS = {name: 1 << index for index, name in enumerate(TOUCH_ZONE_NAMES)}
+_TOUCH_ZONE_INDICES = {
+    name: index for index, name in enumerate(TOUCH_ZONE_NAMES)
+}
 
 
 def _hid_choices() -> tuple[tuple[str, int], ...]:
@@ -143,17 +144,25 @@ def _payload_bytes(payload: object, name: str = "payload") -> bytes:
 
 @dataclass(frozen=True)
 class TouchMapEntry:
-    """One physical touch channel's Mai2Touch mask and scan block."""
+    """One physical channel's single Mai2Touch region and derived block."""
 
-    zone_mask: int
-    block: str
+    zone: str
 
     def __post_init__(self) -> None:
-        mask = _require_plain_int(self.zone_mask, "zone_mask")
-        if not 0 <= mask <= TOUCH_VALID_MASK:
-            raise ValueError("zone_mask contains bits outside the 34 touch zones")
-        if not isinstance(self.block, str) or self.block not in TOUCH_BLOCKS:
-            raise ValueError("block must be one of A, B, C, D, or E")
+        if not isinstance(self.zone, str):
+            raise TypeError("zone must be a string")
+        zone = self.zone.strip().upper()
+        if zone not in _TOUCH_ZONE_INDICES:
+            raise ValueError(f"unknown touch zone: {self.zone}")
+        object.__setattr__(self, "zone", zone)
+
+    @property
+    def zone_index(self) -> int:
+        return _TOUCH_ZONE_INDICES[self.zone]
+
+    @property
+    def block(self) -> str:
+        return self.zone[0]
 
 
 @dataclass(frozen=True)
@@ -227,31 +236,19 @@ class DeviceConfigSnapshot:
             raise TypeError("keyboard must be a KeyboardConfig")
 
 
-def touch_zone_mask(names: Iterable[str] | str) -> int:
-    """Convert selected zone names into the firmware's 34-bit mask."""
+def touch_zone_index(name: str) -> int:
+    """Return the firmware region index for one validated zone name."""
 
-    selected = (names,) if isinstance(names, str) else names
-    mask = 0
-    for raw_name in selected:
-        if not isinstance(raw_name, str):
-            raise TypeError("touch zone names must be strings")
-        name = raw_name.strip().upper()
-        if name in {"", "NONE", "无"}:
-            continue
-        try:
-            mask |= _TOUCH_ZONE_BITS[name]
-        except KeyError as error:
-            raise ValueError(f"unknown touch zone: {raw_name}") from error
-    return mask
+    return TouchMapEntry(name).zone_index
 
 
-def touch_zone_names(mask: int) -> tuple[str, ...]:
-    """Return zone names selected by a validated 34-bit mask."""
+def touch_zone_name(index: int) -> str:
+    """Return the zone name for one firmware region index."""
 
-    TouchMapEntry(mask, "A")
-    return tuple(
-        name for index, name in enumerate(TOUCH_ZONE_NAMES) if mask & (1 << index)
-    )
+    value = _require_plain_int(index, "touch zone index")
+    if not 0 <= value < len(TOUCH_ZONE_NAMES):
+        raise ValueError("touch zone index must be between 0 and 33")
+    return TOUCH_ZONE_NAMES[value]
 
 
 def hid_key_name(keycode: int) -> str:
@@ -285,7 +282,7 @@ def main_keycodes_for_layout(layout: int) -> tuple[int, ...]:
 def encode_touch_entry(entry: TouchMapEntry) -> bytes:
     if not isinstance(entry, TouchMapEntry):
         raise TypeError("entry must be a TouchMapEntry")
-    return entry.zone_mask.to_bytes(5, "little") + entry.block.encode("ascii")
+    return bytes((entry.zone_index, ord(entry.block)))
 
 
 def decode_touch_entry(payload: bytes) -> TouchMapEntry:
@@ -295,13 +292,14 @@ def decode_touch_entry(payload: bytes) -> TouchMapEntry:
             f"touch entry length mismatch: {len(raw)} != {TOUCH_ENTRY_LENGTH}"
         )
     try:
-        block = raw[5:6].decode("ascii")
-    except UnicodeDecodeError as error:
-        raise DeviceConfigError("touch entry block is not ASCII") from error
-    try:
-        return TouchMapEntry(zone_mask=int.from_bytes(raw[:5], "little"), block=block)
+        zone = touch_zone_name(raw[0])
     except ValueError as error:
         raise DeviceConfigError(f"invalid touch entry: {error}") from error
+    if raw[1] != ord(zone[0]):
+        raise DeviceConfigError(
+            f"touch entry block {raw[1]:#04x} does not match zone {zone}"
+        )
+    return TouchMapEntry(zone)
 
 
 def encode_touch_mapping(config: TouchConfig) -> bytes:
@@ -349,7 +347,9 @@ def encode_touch_batch(changes: Mapping[int, TouchMapEntry]) -> bytes:
 def decode_touch_batch(payload: bytes) -> dict[int, TouchMapEntry]:
     raw = _payload_bytes(payload)
     if not raw or len(raw) % TOUCH_BATCH_RECORD_LENGTH:
-        raise DeviceConfigError("touch batch must contain one or more 7-byte records")
+        raise DeviceConfigError(
+            f"touch batch must contain one or more {TOUCH_BATCH_RECORD_LENGTH}-byte records"
+        )
     if len(raw) > TOUCH_CHANNEL_COUNT * TOUCH_BATCH_RECORD_LENGTH:
         raise DeviceConfigError("touch batch contains more than 34 records")
 
@@ -370,7 +370,20 @@ class DeviceConfigController:
     """Synchronous owner of one Magic serial client used for configuration."""
 
     _PROBE_PAYLOADS = (
-        (TOUCH_MODULE, bytes((0x01, 0x02, 0x03, 34, 6, 7, 1))),
+        (
+            TOUCH_MODULE,
+            bytes(
+                (
+                    TOUCH_MAPPING_PARAM,
+                    0x02,
+                    TOUCH_BATCH_PARAM,
+                    TOUCH_CHANNEL_COUNT,
+                    TOUCH_ENTRY_LENGTH,
+                    TOUCH_BATCH_RECORD_LENGTH,
+                    TOUCH_PAYLOAD_VERSION,
+                )
+            ),
+        ),
         (LED_MODULE, bytes((0x01, 0x02))),
         (KEYBOARD_MODULE, bytes((12, 8, 4, 0x80, 0x81, 2))),
     )

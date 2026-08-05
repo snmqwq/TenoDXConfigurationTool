@@ -30,7 +30,6 @@ from .device_config import (
 from .raw_keyboard import list_serial_bus_descriptions
 
 WORKER_EVENT_POLL_INTERVAL_MS = 30
-TOUCH_BLOCKS = ("A", "B", "C", "D", "E")
 LOGICAL_LED_COUNT = 8
 
 ConfigPage = Literal["touch", "led", "keyboard"]
@@ -71,15 +70,6 @@ def serial_port_label(port: Any, bus_description: str | None) -> str:
         f"{port.device} | {reported} | VID {vid_text} | PID {pid_text} | "
         f"描述 {description} | SN {serial_number}"
     )
-
-
-def format_touch_zones(zone_mask: int) -> str:
-    """Format one mapping mask for the compact channel table."""
-
-    names = [
-        name for bit, name in enumerate(TOUCH_ZONE_NAMES) if zone_mask & (1 << bit)
-    ]
-    return ", ".join(names) if names else "none"
 
 
 class DeviceConfigWindow:
@@ -131,9 +121,7 @@ class DeviceConfigWindow:
         self.keyboard_page_status_var = tk.StringVar(value="—")
         self.selected_touch_channel_var = tk.StringVar(value="物理通道：—")
         self.touch_block_var = tk.StringVar(value="A")
-        self.touch_zone_vars = {
-            name: tk.BooleanVar(value=False) for name in TOUCH_ZONE_NAMES
-        }
+        self.touch_zone_var = tk.StringVar(value=TOUCH_ZONE_NAMES[0])
         self.led_per_bit_var = tk.StringVar(value="1")
         self.led_physical_count_var = tk.StringVar(value="物理灯珠总数：8")
         self.led_rainbow_var = tk.BooleanVar(value=False)
@@ -236,16 +224,16 @@ class DeviceConfigWindow:
         table_frame.columnconfigure(0, weight=1)
         self.touch_tree = ttk.Treeview(
             table_frame,
-            columns=("zones", "block"),
+            columns=("zone", "block"),
             show="tree headings",
             selectmode="browse",
             height=20,
         )
         self.touch_tree.heading("#0", text="通道")
-        self.touch_tree.heading("zones", text="触发区块")
+        self.touch_tree.heading("zone", text="触发区块")
         self.touch_tree.heading("block", text="扫描 Block")
         self.touch_tree.column("#0", width=70, minwidth=60, stretch=False)
-        self.touch_tree.column("zones", width=330, minwidth=160)
+        self.touch_tree.column("zone", width=330, minwidth=160)
         self.touch_tree.column("block", width=95, minwidth=80, stretch=False)
         scroll = ttk.Scrollbar(
             table_frame, orient="vertical", command=self.touch_tree.yview
@@ -267,7 +255,7 @@ class DeviceConfigWindow:
         ).grid(row=0, column=0, sticky="w")
         ttk.Label(
             editor,
-            text="一个物理通道可触发多个区块，也可以清空为 none。",
+            text="每个物理通道必须选择一个区域；同一区域可由多个通道复用。",
             foreground="#546E7A",
         ).grid(row=1, column=0, pady=(3, 8), sticky="w")
 
@@ -284,34 +272,25 @@ class DeviceConfigWindow:
             group = ttk.LabelFrame(zones, text=group_name, padding=5)
             group.grid(row=0, column=column, padx=3, sticky="ns")
             for row, name in enumerate(group_names):
-                checkbox = ttk.Checkbutton(
+                radio = ttk.Radiobutton(
                     group,
                     text=name,
-                    variable=self.touch_zone_vars[name],
+                    variable=self.touch_zone_var,
+                    value=name,
                     command=self._commit_touch_editor,
                 )
-                checkbox.grid(row=row, column=0, sticky="w")
-                self.input_widgets.append((checkbox, "normal"))
-
-        clear_button = ttk.Button(
-            editor, text="清空区域（none）", command=self.clear_touch_zones
-        )
-        clear_button.grid(row=3, column=0, pady=(9, 5), sticky="w")
-        self.input_widgets.append((clear_button, "normal"))
+                radio.grid(row=row, column=0, sticky="w")
+                self.input_widgets.append((radio, "normal"))
 
         block_row = ttk.Frame(editor)
-        block_row.grid(row=4, column=0, pady=(5, 0), sticky="w")
+        block_row.grid(row=3, column=0, pady=(9, 0), sticky="w")
         ttk.Label(block_row, text="扫描 Block").grid(row=0, column=0, padx=(0, 8))
-        self.touch_block_combo = ttk.Combobox(
+        ttk.Label(
             block_row,
             textvariable=self.touch_block_var,
-            values=TOUCH_BLOCKS,
-            state="readonly",
             width=6,
-        )
-        self.touch_block_combo.grid(row=0, column=1)
-        self.touch_block_combo.bind("<<ComboboxSelected>>", self._commit_touch_editor)
-        self.input_widgets.append((self.touch_block_combo, "readonly"))
+            anchor="center",
+        ).grid(row=0, column=1)
 
         self._build_page_actions(
             self.touch_page,
@@ -791,7 +770,7 @@ class DeviceConfigWindow:
                 "end",
                 iid=str(index),
                 text=str(index),
-                values=(format_touch_zones(entry.zone_mask), entry.block),
+                values=(entry.zone, entry.block),
             )
             self._update_touch_row(index)
         if self.touch_draft:
@@ -854,8 +833,7 @@ class DeviceConfigWindow:
         self.loading_controls = True
         try:
             self.selected_touch_channel_var.set(f"物理通道：{channel}")
-            for bit, name in enumerate(TOUCH_ZONE_NAMES):
-                self.touch_zone_vars[name].set(bool(entry.zone_mask & (1 << bit)))
+            self.touch_zone_var.set(entry.zone)
             self.touch_block_var.set(entry.block)
         finally:
             self.loading_controls = False
@@ -867,11 +845,8 @@ class DeviceConfigWindow:
         if not selection:
             return
         channel = int(selection[0])
-        zone_mask = 0
-        for bit, name in enumerate(TOUCH_ZONE_NAMES):
-            if self.touch_zone_vars[name].get():
-                zone_mask |= 1 << bit
-        entry = TouchMapEntry(zone_mask=zone_mask, block=self.touch_block_var.get())
+        entry = TouchMapEntry(zone=self.touch_zone_var.get())
+        self.touch_block_var.set(entry.block)
         self.touch_draft[channel] = entry
         self._update_touch_row(channel)
         self._update_touch_dirty()
@@ -885,14 +860,9 @@ class DeviceConfigWindow:
         self.touch_tree.item(
             str(channel),
             text=f"{channel} *" if changed else str(channel),
-            values=(format_touch_zones(entry.zone_mask), entry.block),
+            values=(entry.zone, entry.block),
             tags=("changed",) if changed else (),
         )
-
-    def clear_touch_zones(self) -> None:
-        for variable in self.touch_zone_vars.values():
-            variable.set(False)
-        self._commit_touch_editor()
 
     def _on_led_changed(self, _event: object | None = None) -> None:
         if not self.loading_controls:
@@ -1078,7 +1048,6 @@ def launch_device_config() -> int:
 __all__ = [
     "DeviceConfigUiError",
     "DeviceConfigWindow",
-    "format_touch_zones",
     "launch_device_config",
     "serial_port_label",
 ]

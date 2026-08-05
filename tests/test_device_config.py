@@ -38,8 +38,8 @@ from tenodx_config.device_config import (
     hid_key_name,
     main_keycodes_for_layout,
     parse_hid_key_name,
-    touch_zone_mask,
-    touch_zone_names,
+    touch_zone_index,
+    touch_zone_name,
 )
 from tenodx_config.magic import MagicResponse
 
@@ -82,10 +82,9 @@ class FakeMagicClient:
 
 
 def sample_touch_config() -> TouchConfig:
-    blocks = "ABCDE"
     return TouchConfig(
         entries=tuple(
-            TouchMapEntry(zone_mask=1 << channel, block=blocks[channel % 5])
+            TouchMapEntry(zone=TOUCH_ZONE_NAMES[channel])
             for channel in range(TOUCH_CHANNEL_COUNT)
         )
     )
@@ -98,44 +97,61 @@ class TouchConfigCodecTests(unittest.TestCase):
         self.assertEqual(TOUCH_ZONE_NAMES[15:19], ("B8", "C1", "C2", "D1"))
         self.assertEqual(TOUCH_ZONE_NAMES[-1], "E8")
 
-        mask = touch_zone_mask(("A1", "C2", "E8", "A1"))
-        self.assertEqual(mask, (1 << 0) | (1 << 17) | (1 << 33))
-        self.assertEqual(touch_zone_names(mask), ("A1", "C2", "E8"))
-        self.assertEqual(touch_zone_mask("none"), 0)
-        self.assertEqual(touch_zone_names(0), ())
+        boundaries = (
+            ("A1", 0, "A"),
+            ("A8", 7, "A"),
+            ("B1", 8, "B"),
+            ("B8", 15, "B"),
+            ("C1", 16, "C"),
+            ("C2", 17, "C"),
+            ("D1", 18, "D"),
+            ("D8", 25, "D"),
+            ("E1", 26, "E"),
+            ("E8", 33, "E"),
+        )
+        for zone, index, block in boundaries:
+            with self.subTest(zone=zone):
+                self.assertEqual(touch_zone_index(zone), index)
+                self.assertEqual(touch_zone_name(index), zone)
+                self.assertEqual(TouchMapEntry(zone).block, block)
 
-    def test_unknown_zone_and_out_of_range_mask_are_rejected(self) -> None:
+        self.assertEqual(touch_zone_index(" c2 "), 17)
+
+    def test_unknown_zone_and_out_of_range_index_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown touch zone"):
-            touch_zone_mask(("C3",))
-        with self.assertRaisesRegex(ValueError, "outside"):
-            touch_zone_names(1 << 34)
+            touch_zone_index("C3")
+        with self.assertRaisesRegex(ValueError, "between 0 and 33"):
+            touch_zone_name(34)
 
-    def test_entry_is_five_little_endian_mask_bytes_then_block(self) -> None:
-        entry = TouchMapEntry(zone_mask=(1 << 33) | 1, block="D")
+    def test_entry_is_region_index_then_derived_block(self) -> None:
+        entry = TouchMapEntry(zone="E8")
         encoded = encode_touch_entry(entry)
-        self.assertEqual(encoded, bytes((1, 0, 0, 0, 2, ord("D"))))
+        self.assertEqual(encoded, bytes((33, ord("E"))))
         self.assertEqual(decode_touch_entry(encoded), entry)
+        with self.assertRaisesRegex(DeviceConfigError, "does not match"):
+            decode_touch_entry(bytes((33, ord("A"))))
+        with self.assertRaisesRegex(DeviceConfigError, "between 0 and 33"):
+            decode_touch_entry(bytes((34, ord("E"))))
 
-    def test_complete_mapping_is_exactly_204_bytes_and_round_trips(self) -> None:
+    def test_complete_mapping_is_exactly_68_bytes_and_round_trips(self) -> None:
         config = sample_touch_config()
         encoded = encode_touch_mapping(config)
         self.assertEqual(len(encoded), TOUCH_MAPPING_LENGTH)
         self.assertEqual(decode_touch_mapping(encoded), config)
 
-        with self.assertRaisesRegex(DeviceConfigError, "204"):
+        with self.assertRaisesRegex(DeviceConfigError, "68"):
             decode_touch_mapping(encoded[:-1])
 
-    def test_batch_is_sorted_and_round_trips_channel_records(self) -> None:
-        first = TouchMapEntry(touch_zone_mask(("A1", "B8")), "B")
-        last = TouchMapEntry(0, "E")
-        encoded = encode_touch_batch({33: last, 0: first})
+    def test_batch_allows_shared_region_and_round_trips_channel_records(self) -> None:
+        shared = TouchMapEntry("C2")
+        encoded = encode_touch_batch({33: shared, 0: shared})
 
         self.assertEqual(encoded[0], 0)
-        self.assertEqual(encoded[7], 33)
-        self.assertEqual(decode_touch_batch(encoded), {0: first, 33: last})
+        self.assertEqual(encoded[3], 33)
+        self.assertEqual(decode_touch_batch(encoded), {0: shared, 33: shared})
 
     def test_invalid_batch_records_are_rejected(self) -> None:
-        entry = encode_touch_entry(TouchMapEntry(0, "A"))
+        entry = encode_touch_entry(TouchMapEntry("A1"))
         with self.assertRaisesRegex(DeviceConfigError, "one or more"):
             decode_touch_batch(b"")
         with self.assertRaisesRegex(DeviceConfigError, "invalid.*34"):
@@ -143,13 +159,13 @@ class TouchConfigCodecTests(unittest.TestCase):
         with self.assertRaisesRegex(DeviceConfigError, "duplicate"):
             decode_touch_batch(bytes((1,)) + entry + bytes((1,)) + entry)
         with self.assertRaisesRegex(ValueError, "between 0 and 33"):
-            encode_touch_batch({34: TouchMapEntry(0, "A")})
+            encode_touch_batch({34: TouchMapEntry("A1")})
 
     def test_configuration_models_validate_firmware_limits(self) -> None:
         with self.assertRaisesRegex(ValueError, "34 entries"):
-            TouchConfig(entries=(TouchMapEntry(0, "A"),))
-        with self.assertRaisesRegex(ValueError, "block"):
-            TouchMapEntry(0, "F")
+            TouchConfig(entries=(TouchMapEntry("A1"),))
+        with self.assertRaisesRegex(ValueError, "unknown touch zone"):
+            TouchMapEntry("none")
         with self.assertRaisesRegex(ValueError, "1 and 4"):
             LedConfig(0, False)
         with self.assertRaisesRegex(TypeError, "bool"):
@@ -215,7 +231,7 @@ class DeviceConfigControllerTests(unittest.TestCase):
                     TOUCH_MODULE,
                     GET_INFO_COMMAND,
                     0,
-                    bytes((1, 2, 3, 34, 6, 7, 1)),
+                    bytes((1, 2, 3, 34, 2, 3, 2)),
                 ),
                 response(LED_MODULE, GET_INFO_COMMAND, 0, bytes((1, 2))),
                 response(
@@ -304,7 +320,7 @@ class DeviceConfigControllerTests(unittest.TestCase):
         self.controller.apply_touch({})
         self.assertEqual(self.client.requests, [])
 
-        entry = TouchMapEntry(touch_zone_mask(("A1", "E8")), "E")
+        entry = TouchMapEntry("E8")
         self.client.responses.append(
             response(TOUCH_MODULE, WRITE_COMMAND, TOUCH_BATCH_PARAM)
         )
