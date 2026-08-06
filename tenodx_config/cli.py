@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeVar
@@ -30,7 +31,16 @@ from .usb_reenumeration import (
 )
 
 DEFAULT_DEVICE_ID = "0483:DF11"
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def get_project_root() -> Path:
+    """Return the source root or, when frozen, the executable directory."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+PROJECT_ROOT = get_project_root()
 FIRMWARE_DIR = PROJECT_ROOT / "firmware"
 T = TypeVar("T")
 

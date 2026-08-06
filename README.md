@@ -130,6 +130,10 @@ python main.py dfu --help
 四个 32 位单文件程序输出到 `dist/`。综合版和 DFU 版保留控制台；Test 与 Config
 独立版为无控制台窗口程序。综合版通过 `test`、`dfu`、`config` 子命令选择功能。
 
+脚本还会生成可直接分发的 `release/`，包含四个 EXE、共享的 `firmware/`、使用说明和
+第三方许可证。综合版和 DFU 独立版只读取 EXE 同级 `firmware/` 中严格时间戳命名的
+固件；添加或替换固件后无需重新打包 EXE。
+
 ## 目录结构
 
 ```text

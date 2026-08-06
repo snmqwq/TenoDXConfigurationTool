@@ -29,7 +29,6 @@ try {
         "--noconfirm", "--clean", "--onefile", "--console",
         "--name", "TenoDXConfigurationTool",
         "--add-data", "images;images",
-        "--add-data", "firmware;firmware",
         "--add-data", "DFU\vendor;DFU\vendor",
         "--add-data", "DFU\licenses;DFU\licenses",
         "--add-data", "THIRD_PARTY_NOTICES.md;.",
@@ -56,7 +55,6 @@ try {
     Invoke-PyInstaller -Arguments @(
         "--noconfirm", "--clean", "--onefile", "--console",
         "--name", "TenoDXDFU",
-        "--add-data", "firmware;firmware",
         "--add-data", "DFU\vendor;DFU\vendor",
         "--add-data", "DFU\licenses;DFU\licenses",
         "--add-data", "THIRD_PARTY_NOTICES.md;.",
@@ -84,8 +82,42 @@ try {
         "--exclude-module", "tenodx_config.usb_reenumeration",
         "packaging\config_entrypoint.py"
     )
+
+    $distRoot = Join-Path $projectRoot "dist"
+    $distFirmware = Join-Path $distRoot "firmware"
+    New-Item -ItemType Directory -Path $distFirmware -Force | Out-Null
+    Get-ChildItem -LiteralPath $distFirmware -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^maimai_controller_H503_\d{8}_\d{6}\.bin$' } |
+        Remove-Item -Force
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot "firmware") -File |
+        Where-Object { $_.Name -match '^maimai_controller_H503_\d{8}_\d{6}\.bin$' } |
+        Copy-Item -Destination $distFirmware -Force
+
+    $releaseRoot = Join-Path $projectRoot "release"
+    if ((Split-Path -Parent $releaseRoot) -ne $projectRoot) {
+        throw "发布目录不在项目根目录内: $releaseRoot"
+    }
+    if (Test-Path -LiteralPath $releaseRoot) {
+        Remove-Item -LiteralPath $releaseRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $releaseRoot | Out-Null
+    foreach ($name in @(
+        "TenoDXConfigurationTool.exe",
+        "TenoDXControllerTest.exe",
+        "TenoDXDFU.exe",
+        "TenoDXConfig.exe"
+    )) {
+        Copy-Item -LiteralPath (Join-Path $distRoot $name) -Destination $releaseRoot
+    }
+    Copy-Item -LiteralPath $distFirmware -Destination $releaseRoot -Recurse
+    Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD_PARTY_NOTICES.md") -Destination $releaseRoot
+    Copy-Item -LiteralPath (Join-Path $projectRoot "DFU\licenses") `
+        -Destination (Join-Path $releaseRoot "DFU-licenses") -Recurse
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "RELEASE_README.txt") `
+        -Destination (Join-Path $releaseRoot "使用说明.txt")
 } finally {
     Pop-Location
 }
 
-Write-Host "打包完成，输出目录: $(Join-Path $projectRoot 'dist')"
+Write-Host "打包完成，构建目录: $(Join-Path $projectRoot 'dist')"
+Write-Host "可发布目录: $(Join-Path $projectRoot 'release')"

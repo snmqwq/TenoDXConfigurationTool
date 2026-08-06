@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from tenodx_config.cli import (
     build_parser,
+    get_project_root,
     main,
     run_device_config,
     run_dfu_update,
@@ -19,6 +20,14 @@ from tenodx_config.magic import MagicPort
 
 
 class DfuWorkflowTests(unittest.TestCase):
+    def test_frozen_project_root_is_executable_directory(self) -> None:
+        executable = Path("C:/Release/TenoDXDFU.exe")
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(sys, "executable", str(executable)),
+        ):
+            self.assertEqual(get_project_root(), executable.resolve().parent)
+
     def test_application_passes_selected_device_and_firmware_to_component(self) -> None:
         args = argparse.Namespace(
             firmware=None,
