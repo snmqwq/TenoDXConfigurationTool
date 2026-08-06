@@ -119,6 +119,17 @@ python main.py dfu --help
 
 `DFU/` 组件也可以独立调用，详见 `DFU/README.md`。
 
+## 打包
+
+使用当前虚拟环境一次生成综合版、Test 独立版、DFU 独立版和 Config 独立版：
+
+```powershell
+.\packaging\build_all.ps1
+```
+
+四个 32 位单文件程序输出到 `dist/`。综合版和 DFU 版保留控制台；Test 与 Config
+独立版为无控制台窗口程序。综合版通过 `test`、`dfu`、`config` 子命令选择功能。
+
 ## 目录结构
 
 ```text
