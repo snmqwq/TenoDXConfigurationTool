@@ -113,8 +113,13 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD_PARTY_NOTICES.md") -Destination $releaseRoot
     Copy-Item -LiteralPath (Join-Path $projectRoot "DFU\licenses") `
         -Destination (Join-Path $releaseRoot "DFU-licenses") -Recurse
+    Copy-Item -LiteralPath (Join-Path $projectRoot "DFU\driver") `
+        -Destination (Join-Path $releaseRoot "DFU-driver") -Recurse
+    # Keep the script ASCII-safe because Windows PowerShell 5.1 reads UTF-8
+    # scripts without a BOM using the active ANSI code page.
+    $releaseReadmeName = "$([char]0x4F7F)$([char]0x7528)$([char]0x8BF4)$([char]0x660E).txt"
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "RELEASE_README.txt") `
-        -Destination (Join-Path $releaseRoot "使用说明.txt")
+        -Destination (Join-Path $releaseRoot $releaseReadmeName)
 } finally {
     Pop-Location
 }

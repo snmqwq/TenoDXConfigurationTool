@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import csv
+import base64
 import ctypes
-import io
+import json
 import locale
 import os
 import re
@@ -32,13 +32,15 @@ class UsbReenumerationError(RuntimeError):
 class PnpDevice:
     instance_id: str
     location_paths: str
+    service: str = ""
+    friendly_name: str = ""
 
 
 def get_pnputil_path() -> Path:
     """Locate the native Windows PnPUtil, including from 32-bit Python."""
     if sys.platform != "win32":
         raise UsbReenumerationError("USB 设备重新枚举仅支持 Windows。")
-    windows_dir = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    windows_dir = Path(os.environ.get("SYSTEMROOT", r"C:\Windows"))
     candidates = (
         windows_dir / "Sysnative" / "pnputil.exe",
         windows_dir / "System32" / "pnputil.exe",
@@ -49,9 +51,25 @@ def get_pnputil_path() -> Path:
     raise UsbReenumerationError("找不到 Windows 系统工具 pnputil.exe。")
 
 
+def get_powershell_path() -> Path:
+    """Locate 64-bit Windows PowerShell, including from 32-bit Python."""
+    if sys.platform != "win32":
+        raise UsbReenumerationError("USB 设备枚举仅支持 Windows。")
+    windows_dir = Path(os.environ.get("SYSTEMROOT", r"C:\Windows"))
+    candidates = (
+        windows_dir / "Sysnative" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+        windows_dir / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise UsbReenumerationError("找不到 Windows PowerShell 5.1。")
+
+
 def ensure_usb_reenumeration_available() -> None:
     """Fail before flashing when PnP removal cannot run in this process."""
     get_pnputil_path()
+    get_powershell_path()
     if not ctypes.windll.shell32.IsUserAnAdmin():
         raise UsbReenumerationError(
             "卸载 DFU 设备需要管理员权限，请以管理员身份运行本程序。"
@@ -77,45 +95,171 @@ def _run_pnputil(arguments: list[str], timeout: float = 30.0) -> tuple[int, str]
     return result.returncode, result.stdout or ""
 
 
+def _run_powershell(script: str, timeout: float = 30.0) -> tuple[int, str]:
+    executable = get_powershell_path()
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    try:
+        result = subprocess.run(
+            [
+                str(executable),
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                encoded,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8-sig",
+            errors="replace",
+            creationflags=subprocess_creation_flags(),
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise UsbReenumerationError(
+            f"无法运行 Windows PowerShell 设备枚举: {error}"
+        ) from error
+    output = result.stdout or ""
+    if result.returncode != 0 and result.stderr:
+        output = f"{output}\n{result.stderr}".strip()
+    return result.returncode, output
+
+
 def _hardware_id(device_id: str) -> str:
     vendor_id, product_id = validate_device_id(device_id).split(":", 1)
     return f"USB\\VID_{vendor_id}&PID_{product_id}"
 
 
-def _parse_connected_devices(output: str, hardware_id: str) -> list[PnpDevice]:
+def _parse_pnp_devices(output: str, hardware_id: str) -> list[PnpDevice]:
     expected_prefix = f"{hardware_id}\\".casefold()
+    content = output.strip().lstrip("\ufeff")
+    if not content:
+        return []
+    try:
+        decoded = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise UsbReenumerationError(
+            f"无法解析 Windows PowerShell 设备枚举结果: {error}"
+        ) from error
+    rows = [decoded] if isinstance(decoded, dict) else decoded
+    if not isinstance(rows, list):
+        raise UsbReenumerationError("Windows PowerShell 设备枚举结果格式无效。")
+
     devices: list[PnpDevice] = []
-    for row in csv.reader(io.StringIO(output)):
-        if not row or not row[0].casefold().startswith(expected_prefix):
+    for row in rows:
+        if not isinstance(row, dict):
             continue
+        instance_id = str(row.get("InstanceId") or "").strip()
+        if not instance_id.casefold().startswith(expected_prefix):
+            continue
+        location_paths = row.get("LocationPaths") or []
+        if isinstance(location_paths, str):
+            location_paths = [location_paths]
         devices.append(
             PnpDevice(
-                instance_id=row[0],
-                location_paths=row[-1] if len(row) > 1 else "",
+                instance_id=instance_id,
+                location_paths=";".join(
+                    str(path).strip() for path in location_paths if path
+                ),
+                service=str(row.get("Service") or "").strip(),
+                friendly_name=str(row.get("FriendlyName") or "").strip(),
             )
         )
     return devices
 
 
+def _pnp_enumeration_script(hardware_id: str) -> str:
+    prefix = f"{hardware_id}\\"
+    return rf"""
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+try {{
+    $prefix = '{prefix}'
+    $devices = @(
+        Get-PnpDevice -PresentOnly -ErrorAction Stop |
+            Where-Object {{
+                $_.InstanceId.StartsWith(
+                    $prefix,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }} |
+            ForEach-Object {{
+                $locationProperty = Get-PnpDeviceProperty `
+                    -InstanceId $_.InstanceId `
+                    -KeyName 'DEVPKEY_Device_LocationPaths' `
+                    -ErrorAction SilentlyContinue
+                $serviceProperty = Get-PnpDeviceProperty `
+                    -InstanceId $_.InstanceId `
+                    -KeyName 'DEVPKEY_Device_Service' `
+                    -ErrorAction SilentlyContinue
+                [pscustomobject]@{{
+                    InstanceId = [string]$_.InstanceId
+                    LocationPaths = @($locationProperty.Data)
+                    Service = [string]$serviceProperty.Data
+                    FriendlyName = [string]$_.FriendlyName
+                }}
+            }}
+    )
+    ConvertTo-Json -InputObject @($devices) -Compress -Depth 4
+}} catch {{
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}}
+"""
+
+
 def list_connected_dfu_nodes(device_id: str) -> list[PnpDevice]:
     hardware_id = _hardware_id(device_id)
-    return_code, output = _run_pnputil(
-        [
-            "/enum-devices",
-            "/connected",
-            "/deviceid",
-            hardware_id,
-            "/location",
-            "/format",
-            "csv",
-        ]
-    )
+    return_code, output = _run_powershell(_pnp_enumeration_script(hardware_id))
     if return_code != 0:
         detail = f"\n\n{output}" if output else ""
         raise UsbReenumerationError(
-            f"无法枚举已连接的 {device_id} DFU 设备，退出码 {return_code}。{detail}"
+            "无法通过 Windows PowerShell 枚举已连接的 "
+            f"{device_id} DFU 设备，退出码 {return_code}。{detail}"
         )
-    return _parse_connected_devices(output, hardware_id)
+    return _parse_pnp_devices(output, hardware_id)
+
+
+def describe_new_dfu_nodes(
+    device_id: str,
+    previous_instance_ids: Iterable[str],
+) -> str | None:
+    """Describe PnP nodes that appeared even though dfu-util could not list them."""
+
+    previous = {instance_id.casefold() for instance_id in previous_instance_ids}
+    added = [
+        device
+        for device in list_connected_dfu_nodes(device_id)
+        if device.instance_id.casefold() not in previous
+    ]
+    if not added:
+        return None
+
+    compatible_services = {"winusb", "libusb0", "libusbk"}
+    incompatible = [
+        device for device in added if device.service.casefold() not in compatible_services
+    ]
+    details = "\n".join(
+        "  "
+        + f"{device.friendly_name or '未知设备'}  "
+        + f"service={device.service or '未知'}  {device.instance_id}"
+        for device in added
+    )
+    if incompatible:
+        return (
+            "Windows 已经枚举出新的 DFU 设备，但其驱动不兼容 dfu-util：\n"
+            f"{details}\n"
+            "请运行发布目录 DFU-driver\\install_dfu_driver.cmd，安装并切换到 "
+            "STMicroelectronics 签名的 WinUSB 驱动，然后重新执行刷写。"
+        )
+    return (
+        "Windows 已经枚举出新的 DFU 设备，驱动服务看起来兼容，但 dfu-util 仍未列出：\n"
+        f"{details}\n"
+        "请确认没有其他刷机程序正在占用该设备，并保留本段信息用于诊断。"
+    )
 
 
 def _dfu_port_chain(usb_path: str) -> tuple[int, ...] | None:

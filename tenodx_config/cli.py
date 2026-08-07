@@ -26,7 +26,9 @@ from .magic import (
 )
 from .usb_reenumeration import (
     UsbReenumerationError,
+    describe_new_dfu_nodes,
     ensure_usb_reenumeration_available,
+    list_connected_dfu_nodes,
     remove_dfu_device_and_rescan,
 )
 
@@ -101,7 +103,7 @@ def run_dfu_update(args: argparse.Namespace) -> int:
     firmware = resolve_firmware(args.firmware)
     print(f"固件: {firmware.name}")
 
-    print("[1/6] 正在查找并验证 TenoDX Aime/Magic 串口...")
+    print("[1/6] 正在执行刷写前检查并验证 TenoDX Aime/Magic 串口...")
     magic_ports = discover_magic_ports(args.port)
     if not magic_ports:
         target = f" {args.port}" if args.port else ""
@@ -110,19 +112,29 @@ def run_dfu_update(args: argparse.Namespace) -> int:
     other_magic = [port for port in magic_ports if port != selected_magic]
     print(f"应用设备: {selected_magic.device}")
 
+    print("正在记录进入 DFU 前的设备基线...")
     existing_dfu, _ = list_dfu_devices(args.device_id)
     previous_serials = {device.serial_number for device in existing_dfu}
+    previous_pnp_instances = {
+        device.instance_id for device in list_connected_dfu_nodes(args.device_id)
+    }
 
     print("[2/6] 正在发送进入 DFU 命令...")
     send_enter_dfu(selected_magic)
     print("设备已接受 DFU 命令，应用串口已释放。")
 
     print(f"[3/6] 正在等待新的 {args.device_id} DFU 设备...")
-    new_devices = wait_for_new_dfu_devices(
-        args.device_id,
-        previous_serials,
-        timeout=args.dfu_timeout,
-    )
+    try:
+        new_devices = wait_for_new_dfu_devices(
+            args.device_id,
+            previous_serials,
+            timeout=args.dfu_timeout,
+        )
+    except DfuError as error:
+        diagnostic = describe_new_dfu_nodes(args.device_id, previous_pnp_instances)
+        if diagnostic:
+            raise DfuError(f"{error}\n\n驱动诊断：\n{diagnostic}") from error
+        raise
     selected_dfu = select_dfu_device(new_devices)
     print(f"DFU 设备: {selected_dfu.device_id}  serial={selected_dfu.serial_number}")
 

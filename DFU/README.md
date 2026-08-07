@@ -37,4 +37,5 @@ DFU 设备节点的卸载、USB 重新扫描和应用协议验证由调用方负
 
 `vendor/` 中提供 Windows x64 的 `dfu-util 0.11` 和 `libusb-1.0.dll`，无需安装
 STM32CubeProgrammer。Windows 仍需为 STM32 DFU 设备安装兼容的 WinUSB/libusbK
-驱动。
+驱动。`driver/` 提供 STMicroelectronics 签名的 `STM32 Bootloader` WinUSB 驱动；
+关闭刷机程序后，以管理员权限运行 `driver/install_dfu_driver.cmd` 即可安装、扫描并验证。

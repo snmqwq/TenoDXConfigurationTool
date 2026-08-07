@@ -20,3 +20,15 @@ LGPL-2.1-or-later.
 - Source: https://github.com/libusb/libusb/tree/1a90627
 
 The upstream LGPL license is stored as `DFU/licenses/libusb-COPYING.txt`.
+
+## STM32 Bootloader WinUSB driver 1.3.0.0
+
+This distribution includes the STMicroelectronics-signed INF and catalog for
+`USB\\VID_0483&PID_DF11`. The package binds the STM32 system-memory bootloader
+to the Microsoft WinUSB service and contains no third-party kernel driver
+binary.
+
+The STMicroelectronics software-package license is retained verbatim at the
+start of `DFU/driver/STM32Bootloader.inf`. Redistribution is permitted subject
+to those terms, including use solely on or in combination with devices
+manufactured by or for STMicroelectronics.

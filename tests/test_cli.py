@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from DFU import DfuError
 from tenodx_config.cli import (
     build_parser,
     get_project_root,
@@ -50,18 +51,23 @@ class DfuWorkflowTests(unittest.TestCase):
             patch("tenodx_config.cli.ensure_usb_reenumeration_available") as preflight,
             patch("tenodx_config.cli.discover_magic_ports", return_value=[magic]),
             patch("tenodx_config.cli.list_dfu_devices", return_value=([], "")),
+            patch("tenodx_config.cli.list_connected_dfu_nodes", return_value=[]),
             patch("tenodx_config.cli.send_enter_dfu") as enter,
             patch("tenodx_config.cli.wait_for_new_dfu_devices", return_value=[dfu]),
             patch("tenodx_config.cli.select_dfu_device", return_value=dfu),
             patch("tenodx_config.cli.flash_firmware") as flash,
             patch("tenodx_config.cli.remove_dfu_device_and_rescan") as remove,
             patch("tenodx_config.cli.wait_for_magic_return", return_value=returned),
-            patch("builtins.print"),
+            patch("builtins.print") as output,
         ):
             result = run_dfu_update(args)
 
         self.assertEqual(result, 0)
         preflight.assert_called_once_with()
+        output.assert_any_call(
+            "[1/6] 正在执行刷写前检查并验证 TenoDX Aime/Magic 串口..."
+        )
+        output.assert_any_call("正在记录进入 DFU 前的设备基线...")
         enter.assert_called_once_with(magic)
         flash.assert_called_once()
         remove.assert_called_once()
@@ -83,6 +89,36 @@ class DfuWorkflowTests(unittest.TestCase):
                 "on_output": remove.call_args.kwargs["on_output"],
             },
         )
+
+    def test_dfu_timeout_adds_incompatible_driver_diagnostic(self) -> None:
+        args = argparse.Namespace(
+            firmware=None,
+            port=None,
+            device_id="0483:DF11",
+            dfu_timeout=20.0,
+            app_timeout=30.0,
+        )
+        firmware = Path("firmware/maimai_controller_H503_20260802_120000.bin")
+        magic = MagicPort(device="COM7", usb_serial="APP-UID")
+        with (
+            patch("tenodx_config.cli.resolve_firmware", return_value=firmware),
+            patch("tenodx_config.cli.ensure_usb_reenumeration_available"),
+            patch("tenodx_config.cli.discover_magic_ports", return_value=[magic]),
+            patch("tenodx_config.cli.list_dfu_devices", return_value=([], "")),
+            patch("tenodx_config.cli.list_connected_dfu_nodes", return_value=[]),
+            patch("tenodx_config.cli.send_enter_dfu"),
+            patch(
+                "tenodx_config.cli.wait_for_new_dfu_devices",
+                side_effect=DfuError("20 秒内未出现新的设备"),
+            ),
+            patch(
+                "tenodx_config.cli.describe_new_dfu_nodes",
+                return_value="驱动不兼容 dfu-util：service=STTub30",
+            ),
+            patch("builtins.print"),
+            self.assertRaisesRegex(DfuError, "STTub30"),
+        ):
+            run_dfu_update(args)
 
 
 class LiveTestCommandTests(unittest.TestCase):
