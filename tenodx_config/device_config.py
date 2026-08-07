@@ -24,6 +24,7 @@ SAVE_COMMAND = 0x03
 GET_INFO_COMMAND = 0x05
 
 TOUCH_MAPPING_PARAM = 0x01
+TOUCH_CDC_MODE_PARAM = 0x02
 TOUCH_BATCH_PARAM = 0x03
 LED_PER_BIT_PARAM = 0x01
 LED_RAINBOW_PARAM = 0x02
@@ -36,6 +37,9 @@ TOUCH_ENTRY_LENGTH = 2
 TOUCH_MAPPING_LENGTH = TOUCH_CHANNEL_COUNT * TOUCH_ENTRY_LENGTH
 TOUCH_BATCH_RECORD_LENGTH = TOUCH_ENTRY_LENGTH + 1
 TOUCH_PAYLOAD_VERSION = 2
+
+TOUCH_CDC_MODE_RAW = 0
+TOUCH_CDC_MODE_MAI2TOUCH = 1
 
 LAYOUT_1P = 0
 LAYOUT_2P = 1
@@ -167,9 +171,10 @@ class TouchMapEntry:
 
 @dataclass(frozen=True)
 class TouchConfig:
-    """The complete mapping for all 34 physical touch channels."""
+    """The complete mapping and CDC output mode for all touch channels."""
 
     entries: tuple[TouchMapEntry, ...]
+    cdc_mode: int = TOUCH_CDC_MODE_MAI2TOUCH
 
     def __post_init__(self) -> None:
         entries = tuple(self.entries)
@@ -179,7 +184,11 @@ class TouchConfig:
             )
         if any(not isinstance(entry, TouchMapEntry) for entry in entries):
             raise TypeError("touch configuration entries must be TouchMapEntry values")
+        cdc_mode = _require_plain_int(self.cdc_mode, "cdc_mode")
+        if cdc_mode not in (TOUCH_CDC_MODE_RAW, TOUCH_CDC_MODE_MAI2TOUCH):
+            raise ValueError("cdc_mode must be RAW or Mai2Touch")
         object.__setattr__(self, "entries", entries)
+        object.__setattr__(self, "cdc_mode", cdc_mode)
 
 
 @dataclass(frozen=True)
@@ -308,7 +317,11 @@ def encode_touch_mapping(config: TouchConfig) -> bytes:
     return b"".join(encode_touch_entry(entry) for entry in config.entries)
 
 
-def decode_touch_mapping(payload: bytes) -> TouchConfig:
+def decode_touch_mapping(
+    payload: bytes,
+    *,
+    cdc_mode: int = TOUCH_CDC_MODE_MAI2TOUCH,
+) -> TouchConfig:
     raw = _payload_bytes(payload)
     if len(raw) != TOUCH_MAPPING_LENGTH:
         raise DeviceConfigError(
@@ -318,8 +331,31 @@ def decode_touch_mapping(payload: bytes) -> TouchConfig:
         entries=tuple(
             decode_touch_entry(raw[offset : offset + TOUCH_ENTRY_LENGTH])
             for offset in range(0, len(raw), TOUCH_ENTRY_LENGTH)
-        )
+        ),
+        cdc_mode=cdc_mode,
     )
+
+
+def encode_touch_cdc_mode(cdc_mode: int) -> bytes:
+    """Encode one validated Touch CDC output mode."""
+
+    value = _require_plain_int(cdc_mode, "cdc_mode")
+    if value not in (TOUCH_CDC_MODE_RAW, TOUCH_CDC_MODE_MAI2TOUCH):
+        raise ValueError("cdc_mode must be RAW or Mai2Touch")
+    return bytes((value,))
+
+
+def decode_touch_cdc_mode(payload: bytes) -> int:
+    """Decode one Touch CDC output mode returned by the firmware."""
+
+    raw = _payload_bytes(payload)
+    if len(raw) != 1:
+        raise DeviceConfigError(f"touch CDC mode length mismatch: {len(raw)} != 1")
+    try:
+        encode_touch_cdc_mode(raw[0])
+    except ValueError as error:
+        raise DeviceConfigError(f"invalid Touch CDC mode: {raw[0]}") from error
+    return raw[0]
 
 
 def encode_touch_batch(changes: Mapping[int, TouchMapEntry]) -> bytes:
@@ -375,7 +411,7 @@ class DeviceConfigController:
             bytes(
                 (
                     TOUCH_MAPPING_PARAM,
-                    0x02,
+                    TOUCH_CDC_MODE_PARAM,
                     TOUCH_BATCH_PARAM,
                     TOUCH_CHANNEL_COUNT,
                     TOUCH_ENTRY_LENGTH,
@@ -489,25 +525,47 @@ class DeviceConfigController:
         )
 
     def read_touch(self) -> TouchConfig:
-        response = self._request(
+        mapping = self._request(
             TOUCH_MODULE,
             READ_COMMAND,
             TOUCH_MAPPING_PARAM,
             expected_length=TOUCH_MAPPING_LENGTH,
         )
-        return decode_touch_mapping(response.payload)
-
-    def apply_touch(self, changes: Mapping[int, TouchMapEntry]) -> None:
-        payload = encode_touch_batch(changes)
-        if not payload:
-            return
-        self._request(
+        cdc_mode = self._request(
             TOUCH_MODULE,
-            WRITE_COMMAND,
-            TOUCH_BATCH_PARAM,
-            payload,
-            expected_payload=b"",
+            READ_COMMAND,
+            TOUCH_CDC_MODE_PARAM,
+            expected_length=1,
         )
+        return decode_touch_mapping(
+            mapping.payload,
+            cdc_mode=decode_touch_cdc_mode(cdc_mode.payload),
+        )
+
+    def apply_touch(
+        self,
+        changes: Mapping[int, TouchMapEntry],
+        *,
+        cdc_mode: int | None = None,
+    ) -> None:
+        payload = encode_touch_batch(changes)
+        mode_payload = None if cdc_mode is None else encode_touch_cdc_mode(cdc_mode)
+        if payload:
+            self._request(
+                TOUCH_MODULE,
+                WRITE_COMMAND,
+                TOUCH_BATCH_PARAM,
+                payload,
+                expected_payload=b"",
+            )
+        if mode_payload is not None:
+            self._request(
+                TOUCH_MODULE,
+                WRITE_COMMAND,
+                TOUCH_CDC_MODE_PARAM,
+                mode_payload,
+                expected_payload=b"",
+            )
 
     def save_touch(self) -> None:
         self._save(TOUCH_MODULE)

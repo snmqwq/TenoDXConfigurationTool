@@ -17,6 +17,8 @@ from .device_config import (
     HID_KEY_CHOICES,
     LAYOUT_1P,
     LAYOUT_2P,
+    TOUCH_CDC_MODE_MAI2TOUCH,
+    TOUCH_CDC_MODE_RAW,
     TOUCH_ZONE_NAMES,
     DeviceConfigController,
     DeviceConfigSnapshot,
@@ -45,6 +47,12 @@ class _WorkerCommand:
     page: ConfigPage | None = None
     value: Any = None
     save: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _TouchApplyValue:
+    changes: dict[int, TouchMapEntry]
+    cdc_mode: int | None
 
 
 @dataclass(slots=True)
@@ -122,6 +130,7 @@ class DeviceConfigWindow:
         self.selected_touch_channel_var = tk.StringVar(value="物理通道：—")
         self.touch_block_var = tk.StringVar(value="A")
         self.touch_zone_var = tk.StringVar(value=TOUCH_ZONE_NAMES[0])
+        self.touch_cdc_mode_var = tk.IntVar(value=TOUCH_CDC_MODE_MAI2TOUCH)
         self.led_per_bit_var = tk.StringVar(value="1")
         self.led_physical_count_var = tk.StringVar(value="物理灯珠总数：8")
         self.led_rainbow_var = tk.BooleanVar(value=False)
@@ -291,6 +300,29 @@ class DeviceConfigWindow:
             width=6,
             anchor="center",
         ).grid(row=0, column=1)
+
+        mode_frame = ttk.LabelFrame(editor, text="CDC 输出模式", padding=8)
+        mode_frame.grid(row=4, column=0, pady=(14, 0), sticky="ew")
+        for column, (text, value) in enumerate(
+            (
+                ("Mai2Touch 协议", TOUCH_CDC_MODE_MAI2TOUCH),
+                ("RAW 原始数据", TOUCH_CDC_MODE_RAW),
+            )
+        ):
+            radio = ttk.Radiobutton(
+                mode_frame,
+                text=text,
+                variable=self.touch_cdc_mode_var,
+                value=value,
+                command=self._on_touch_mode_changed,
+            )
+            radio.grid(row=0, column=column, padx=(0, 14), sticky="w")
+            self.input_widgets.append((radio, "normal"))
+        ttk.Label(
+            mode_frame,
+            text="选择后需点击临时应用或应用并保存；切换模式不会重置 PSoC。",
+            foreground="#546E7A",
+        ).grid(row=1, column=0, columnspan=2, pady=(6, 0), sticky="w")
 
         self._build_page_actions(
             self.touch_page,
@@ -609,7 +641,7 @@ class DeviceConfigWindow:
         save: bool,
     ) -> None:
         if page == "touch":
-            controller.apply_touch(value)
+            controller.apply_touch(value.changes, cdc_mode=value.cdc_mode)
             if save:
                 controller.save_touch()
             return
@@ -671,11 +703,22 @@ class DeviceConfigWindow:
         if page == "touch":
             if self.touch_device_config is None:
                 raise ValueError("尚未读取 Touch 配置")
-            return {
+            changes = {
                 index: entry
                 for index, entry in enumerate(self.touch_draft)
                 if entry != self.touch_device_config.entries[index]
             }
+            cdc_mode = self.touch_cdc_mode_var.get()
+            if cdc_mode not in (TOUCH_CDC_MODE_RAW, TOUCH_CDC_MODE_MAI2TOUCH):
+                raise ValueError("Touch CDC 输出模式无效")
+            return _TouchApplyValue(
+                changes=changes,
+                cdc_mode=(
+                    cdc_mode
+                    if cdc_mode != self.touch_device_config.cdc_mode
+                    else None
+                ),
+            )
         if page == "led":
             return self._current_led_config()
         if page == "keyboard":
@@ -762,6 +805,11 @@ class DeviceConfigWindow:
     def _load_touch(self, config: TouchConfig) -> None:
         self.touch_device_config = config
         self.touch_draft = list(config.entries)
+        self.loading_controls = True
+        try:
+            self.touch_cdc_mode_var.set(config.cdc_mode)
+        finally:
+            self.loading_controls = False
         for item in self.touch_tree.get_children():
             self.touch_tree.delete(item)
         for index, entry in enumerate(self.touch_draft):
@@ -851,6 +899,10 @@ class DeviceConfigWindow:
         self._update_touch_row(channel)
         self._update_touch_dirty()
 
+    def _on_touch_mode_changed(self) -> None:
+        if not self.loading_controls:
+            self._update_touch_dirty()
+
     def _update_touch_row(self, channel: int) -> None:
         entry = self.touch_draft[channel]
         changed = (
@@ -915,7 +967,11 @@ class DeviceConfigWindow:
     def _update_touch_dirty(self) -> None:
         dirty = (
             self.touch_device_config is not None
-            and tuple(self.touch_draft) != self.touch_device_config.entries
+            and (
+                tuple(self.touch_draft) != self.touch_device_config.entries
+                or self.touch_cdc_mode_var.get()
+                != self.touch_device_config.cdc_mode
+            )
         )
         self.touch_dirty_var.set("有未应用修改" if dirty else "已与设备同步")
 
@@ -956,9 +1012,17 @@ class DeviceConfigWindow:
             if self.touch_device_config is None:
                 raise RuntimeError("尚未读取 Touch 配置")
             entries = list(self.touch_device_config.entries)
-            for channel, entry in value.items():
+            for channel, entry in value.changes.items():
                 entries[channel] = entry
-            self.touch_device_config = TouchConfig(entries=tuple(entries))
+            cdc_mode = (
+                self.touch_device_config.cdc_mode
+                if value.cdc_mode is None
+                else value.cdc_mode
+            )
+            self.touch_device_config = TouchConfig(
+                entries=tuple(entries),
+                cdc_mode=cdc_mode,
+            )
             for channel in range(len(self.touch_draft)):
                 self._update_touch_row(channel)
             self._update_touch_dirty()

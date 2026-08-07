@@ -17,6 +17,9 @@ from tenodx_config.device_config import (
     READ_COMMAND,
     SAVE_COMMAND,
     TOUCH_BATCH_PARAM,
+    TOUCH_CDC_MODE_MAI2TOUCH,
+    TOUCH_CDC_MODE_PARAM,
+    TOUCH_CDC_MODE_RAW,
     TOUCH_CHANNEL_COUNT,
     TOUCH_MAPPING_LENGTH,
     TOUCH_MAPPING_PARAM,
@@ -30,9 +33,11 @@ from tenodx_config.device_config import (
     TouchConfig,
     TouchMapEntry,
     decode_touch_batch,
+    decode_touch_cdc_mode,
     decode_touch_entry,
     decode_touch_mapping,
     encode_touch_batch,
+    encode_touch_cdc_mode,
     encode_touch_entry,
     encode_touch_mapping,
     hid_key_name,
@@ -81,12 +86,15 @@ class FakeMagicClient:
         self.closed = True
 
 
-def sample_touch_config() -> TouchConfig:
+def sample_touch_config(
+    cdc_mode: int = TOUCH_CDC_MODE_MAI2TOUCH,
+) -> TouchConfig:
     return TouchConfig(
         entries=tuple(
             TouchMapEntry(zone=TOUCH_ZONE_NAMES[channel])
             for channel in range(TOUCH_CHANNEL_COUNT)
-        )
+        ),
+        cdc_mode=cdc_mode,
     )
 
 
@@ -142,6 +150,16 @@ class TouchConfigCodecTests(unittest.TestCase):
         with self.assertRaisesRegex(DeviceConfigError, "68"):
             decode_touch_mapping(encoded[:-1])
 
+    def test_cdc_mode_codec_accepts_only_raw_and_mai2touch(self) -> None:
+        self.assertEqual(encode_touch_cdc_mode(TOUCH_CDC_MODE_RAW), b"\x00")
+        self.assertEqual(
+            decode_touch_cdc_mode(b"\x01"), TOUCH_CDC_MODE_MAI2TOUCH
+        )
+        with self.assertRaisesRegex(ValueError, "RAW or Mai2Touch"):
+            encode_touch_cdc_mode(2)
+        with self.assertRaisesRegex(DeviceConfigError, "invalid Touch CDC mode"):
+            decode_touch_cdc_mode(b"\x02")
+
     def test_batch_allows_shared_region_and_round_trips_channel_records(self) -> None:
         shared = TouchMapEntry("C2")
         encoded = encode_touch_batch({33: shared, 0: shared})
@@ -164,6 +182,8 @@ class TouchConfigCodecTests(unittest.TestCase):
     def test_configuration_models_validate_firmware_limits(self) -> None:
         with self.assertRaisesRegex(ValueError, "34 entries"):
             TouchConfig(entries=(TouchMapEntry("A1"),))
+        with self.assertRaisesRegex(ValueError, "RAW or Mai2Touch"):
+            sample_touch_config(cdc_mode=2)
         with self.assertRaisesRegex(ValueError, "unknown touch zone"):
             TouchMapEntry("none")
         with self.assertRaisesRegex(ValueError, "1 and 4"):
@@ -280,7 +300,7 @@ class DeviceConfigControllerTests(unittest.TestCase):
 
     def test_read_snapshot_decodes_all_modules_and_unknown_ek_value(self) -> None:
         assert self.client is not None
-        touch = sample_touch_config()
+        touch = sample_touch_config(cdc_mode=TOUCH_CDC_MODE_RAW)
         self.client.responses.extend(
             (
                 response(
@@ -288,6 +308,12 @@ class DeviceConfigControllerTests(unittest.TestCase):
                     READ_COMMAND,
                     TOUCH_MAPPING_PARAM,
                     encode_touch_mapping(touch),
+                ),
+                response(
+                    TOUCH_MODULE,
+                    READ_COMMAND,
+                    TOUCH_CDC_MODE_PARAM,
+                    bytes((TOUCH_CDC_MODE_RAW,)),
                 ),
                 response(LED_MODULE, READ_COMMAND, LED_PER_BIT_PARAM, b"\x03"),
                 response(LED_MODULE, READ_COMMAND, LED_RAINBOW_PARAM, b"\x01"),
@@ -315,7 +341,9 @@ class DeviceConfigControllerTests(unittest.TestCase):
             KeyboardConfig(LAYOUT_2P, (0x20, 0xAB, 0x25, 0)),
         )
 
-    def test_apply_touch_uses_batch_and_empty_change_is_noop(self) -> None:
+    def test_apply_touch_uses_batch_and_cdc_mode_and_empty_change_is_noop(
+        self,
+    ) -> None:
         assert self.client is not None
         self.controller.apply_touch({})
         self.assertEqual(self.client.requests, [])
@@ -332,6 +360,20 @@ class DeviceConfigControllerTests(unittest.TestCase):
                 WRITE_COMMAND,
                 TOUCH_BATCH_PARAM,
                 bytes((12,)) + encode_touch_entry(entry),
+            ),
+        )
+
+        self.client.responses.append(
+            response(TOUCH_MODULE, WRITE_COMMAND, TOUCH_CDC_MODE_PARAM)
+        )
+        self.controller.apply_touch({}, cdc_mode=TOUCH_CDC_MODE_RAW)
+        self.assertEqual(
+            self.client.requests[-1],
+            (
+                TOUCH_MODULE,
+                WRITE_COMMAND,
+                TOUCH_CDC_MODE_PARAM,
+                bytes((TOUCH_CDC_MODE_RAW,)),
             ),
         )
 

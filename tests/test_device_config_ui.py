@@ -11,6 +11,8 @@ from unittest.mock import patch
 from tenodx_config.device_config import (
     LAYOUT_1P,
     LAYOUT_2P,
+    TOUCH_CDC_MODE_MAI2TOUCH,
+    TOUCH_CDC_MODE_RAW,
     TOUCH_ZONE_NAMES,
     DeviceConfigSnapshot,
     KeyboardConfig,
@@ -68,13 +70,21 @@ class FakeController:
         self._record("read_touch")
         return self.touch
 
-    def apply_touch(self, changes: Mapping[int, TouchMapEntry]) -> None:
+    def apply_touch(
+        self,
+        changes: Mapping[int, TouchMapEntry],
+        *,
+        cdc_mode: int | None = None,
+    ) -> None:
         copied = dict(changes)
-        self._record("apply_touch", copied)
+        self._record("apply_touch", copied, cdc_mode)
         entries = list(self.touch.entries)
         for channel, entry in copied.items():
             entries[channel] = entry
-        self.touch = TouchConfig(tuple(entries))
+        self.touch = TouchConfig(
+            tuple(entries),
+            self.touch.cdc_mode if cdc_mode is None else cdc_mode,
+        )
 
     def save_touch(self) -> None:
         self._record("save_touch")
@@ -209,6 +219,9 @@ class DeviceConfigWindowTests(unittest.TestCase):
                 [("open", "COM12"), ("probe",), ("read_snapshot",)],
             )
             self.assertEqual(app.touch_dirty_var.get(), "已与设备同步")
+            self.assertEqual(
+                app.touch_cdc_mode_var.get(), TOUCH_CDC_MODE_MAI2TOUCH
+            )
             self.assertEqual(app.led_dirty_var.get(), "已与设备同步")
             self.assertEqual(app.keyboard_dirty_var.get(), "已与设备同步")
         finally:
@@ -268,9 +281,25 @@ class DeviceConfigWindowTests(unittest.TestCase):
             self.assertEqual(set(changes), {0, 1})
             self.assertEqual(changes[0], TouchMapEntry("C2"))
             self.assertEqual(changes[1], TouchMapEntry("C2"))
+            self.assertIsNone(touch_calls[0][2])
             self.assertNotIn(("save_touch",), controller.calls)
             self.assertEqual(app.touch_tree.item("0", "text"), "0")
             self.assertEqual(app.touch_tree.item("1", "text"), "1")
+
+            app.touch_cdc_mode_var.set(TOUCH_CDC_MODE_RAW)
+            app._on_touch_mode_changed()
+            self.assertEqual(app.touch_dirty_var.get(), "有未应用修改")
+            app.apply_page("touch", save=True)
+            wait_for_tk(root, lambda: not app.operation_pending)
+            self.assertIn(
+                ("apply_touch", {}, TOUCH_CDC_MODE_RAW),
+                controller.calls,
+            )
+            mode_call_index = controller.calls.index(
+                ("apply_touch", {}, TOUCH_CDC_MODE_RAW)
+            )
+            self.assertEqual(controller.calls[mode_call_index + 1], ("save_touch",))
+            self.assertEqual(app.touch_dirty_var.get(), "已与设备同步")
 
             app.led_per_bit_var.set("4")
             app.led_rainbow_var.set(True)
