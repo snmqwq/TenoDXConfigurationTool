@@ -8,17 +8,33 @@ import tkinter as tk
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
-from tkinter import messagebox, ttk
+from datetime import datetime, timezone
+from tkinter import filedialog, messagebox, ttk
 from typing import Any, Literal
 
 from serial.tools import list_ports
 
+from .config_file import (
+    CONFIG_FILE_EXTENSION,
+    ConfigFileError,
+    read_config_file,
+    write_config_file,
+)
 from .device_config import (
     HID_KEY_CHOICES,
     LAYOUT_1P,
     LAYOUT_2P,
+    PSOC_STATUS_FLAG_CONNECTED,
+    PSOC_STATUS_FLAG_LEGACY_FIRMWARE,
+    PSOC_STATUS_FLAG_OPERATIONAL,
+    PSOC_STATUS_FLAG_POWER_CYCLE_REQUIRED,
+    PSOC_STATUS_FLAG_SOFT_RESET_SUPPORTED,
+    PSOC_STATUS_FLAG_UNAVAILABLE,
+    PSOC_STATUS_FLAG_VALID,
     TOUCH_CDC_MODE_MAI2TOUCH,
     TOUCH_CDC_MODE_RAW,
+    TOUCH_STATUS_FLAG_READ_INFLIGHT,
+    TOUCH_STATUS_FLAG_REINIT_REQUESTED,
     TOUCH_ZONE_NAMES,
     DeviceConfigController,
     DeviceConfigSnapshot,
@@ -26,13 +42,38 @@ from .device_config import (
     LedConfig,
     TouchConfig,
     TouchMapEntry,
+    TouchRuntimeStatus,
     hid_key_name,
     main_keycodes_for_layout,
 )
 from .raw_keyboard import list_serial_bus_descriptions
 
 WORKER_EVENT_POLL_INTERVAL_MS = 30
+TOUCH_STATUS_POLL_INTERVAL_MS = 500
 LOGICAL_LED_COUNT = 8
+
+TOUCH_STATE_NAMES = {
+    0: "等待发现 PSoC",
+    1: "准备 PSoC",
+    2: "等待 PSoC 重启",
+    3: "验证 PSoC 重启",
+    4: "写入 PSoC 配置",
+    5: "等待校准",
+    6: "运行中",
+    7: "排空 I2C 后重初始化",
+}
+PSOC_STATUS_NAMES = {
+    0x00: "等待配置",
+    0x01: "开始初始化",
+    0x02: "运行中",
+    0x11: "启动 CapSense",
+    0x12: "应用参数",
+    0x13: "读取 Cp",
+    0x14: "SAR 校准",
+    0x15: "初始化基线",
+    0xAD: "收到软复位命令",
+    0xFF: "未知",
+}
 
 ConfigPage = Literal["touch", "led", "keyboard"]
 
@@ -43,7 +84,7 @@ class DeviceConfigUiError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _WorkerCommand:
-    kind: Literal["read", "apply", "disconnect"]
+    kind: Literal["read", "apply", "restore", "status", "disconnect"]
     page: ConfigPage | None = None
     value: Any = None
     save: bool = False
@@ -109,12 +150,16 @@ class DeviceConfigWindow:
             queue.SimpleQueue()
         )
         self.worker_poll_after_id: str | None = None
+        self.touch_status_after_id: str | None = None
+        self.touch_status_pending = False
+        self.touch_status_supported = True
 
         self.serial_ports_by_label: dict[str, Any] = {}
         self.port_var = tk.StringVar()
         self.status_var = tk.StringVar(value="请选择 Aime / Magic 串口")
 
         self.snapshot: DeviceConfigSnapshot | None = None
+        self.imported_pending: set[ConfigPage] = set()
         self.touch_device_config: TouchConfig | None = None
         self.touch_draft: list[TouchMapEntry] = []
         self.led_device_config: LedConfig | None = None
@@ -125,6 +170,11 @@ class DeviceConfigWindow:
         self.led_dirty_var = tk.StringVar(value="尚未读取")
         self.keyboard_dirty_var = tk.StringVar(value="尚未读取")
         self.touch_page_status_var = tk.StringVar(value="—")
+        self.touch_controller_status_var = tk.StringVar(value="未连接")
+        self.psoc_status_vars = [
+            tk.StringVar(value=f"PSoC{index}：未连接") for index in range(2)
+        ]
+        self.psoc_status_labels: list[tk.Label] = []
         self.led_page_status_var = tk.StringVar(value="—")
         self.keyboard_page_status_var = tk.StringVar(value="—")
         self.selected_touch_channel_var = tk.StringVar(value="物理通道：—")
@@ -151,6 +201,7 @@ class DeviceConfigWindow:
             "led": [],
             "keyboard": [],
         }
+        self.config_file_buttons: list[ttk.Button] = []
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -193,6 +244,22 @@ class DeviceConfigWindow:
         )
         self.connect_button.grid(row=0, column=3)
 
+        file_actions = ttk.Frame(connection)
+        file_actions.grid(row=1, column=0, columnspan=4, pady=(8, 2), sticky="w")
+        import_button = ttk.Button(
+            file_actions,
+            text="导入配置",
+            command=self.import_configuration,
+        )
+        import_button.grid(row=0, column=0, padx=(0, 6))
+        export_button = ttk.Button(
+            file_actions,
+            text="导出配置",
+            command=self.export_configuration,
+        )
+        export_button.grid(row=0, column=1, padx=6)
+        self.config_file_buttons.extend((import_button, export_button))
+
         warning = tk.Label(
             connection,
             text="配置与 Aime 协议共用同一串口；连接前请先断开综合测试中的 Aime。",
@@ -200,7 +267,7 @@ class DeviceConfigWindow:
             foreground="#AD5700",
             background=self.root.cget("background"),
         )
-        warning.grid(row=1, column=0, columnspan=4, pady=(8, 2), sticky="ew")
+        warning.grid(row=2, column=0, columnspan=4, pady=(8, 2), sticky="ew")
         self.status_label = tk.Label(
             connection,
             textvariable=self.status_var,
@@ -208,7 +275,7 @@ class DeviceConfigWindow:
             foreground="#455A64",
             background=self.root.cget("background"),
         )
-        self.status_label.grid(row=2, column=0, columnspan=4, sticky="ew")
+        self.status_label.grid(row=3, column=0, columnspan=4, sticky="ew")
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.grid(row=1, column=0, sticky="nsew")
@@ -221,6 +288,7 @@ class DeviceConfigWindow:
         self._build_touch_page()
         self._build_led_page()
         self._build_keyboard_page()
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
     def _build_touch_page(self) -> None:
         self.touch_page.rowconfigure(0, weight=1)
@@ -324,9 +392,58 @@ class DeviceConfigWindow:
             foreground="#546E7A",
         ).grid(row=1, column=0, columnspan=2, pady=(6, 0), sticky="w")
 
+        runtime = ttk.LabelFrame(
+            self.touch_page,
+            text="PSoC 运行状态（每 500 ms 刷新）",
+            padding=8,
+        )
+        runtime.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            pady=(10, 0),
+            sticky="ew",
+        )
+        runtime.columnconfigure(0, weight=1)
+        runtime.columnconfigure(1, weight=1)
+        self.touch_controller_status_label = tk.Label(
+            runtime,
+            textvariable=self.touch_controller_status_var,
+            anchor="w",
+            justify="left",
+            foreground="#455A64",
+            background=self.root.cget("background"),
+        )
+        self.touch_controller_status_label.grid(
+            row=0, column=0, columnspan=2, pady=(0, 6), sticky="ew"
+        )
+        for index in range(2):
+            card = ttk.LabelFrame(
+                runtime,
+                text=f"PSoC{index} / I²C 0x{8 + index:02X}",
+                padding=7,
+            )
+            card.grid(
+                row=1,
+                column=index,
+                padx=((0, 5) if index == 0 else (5, 0)),
+                sticky="nsew",
+            )
+            card.columnconfigure(0, weight=1)
+            label = tk.Label(
+                card,
+                textvariable=self.psoc_status_vars[index],
+                anchor="nw",
+                justify="left",
+                foreground="#455A64",
+                background=self.root.cget("background"),
+            )
+            label.grid(row=0, column=0, sticky="ew")
+            self.psoc_status_labels.append(label)
+
         self._build_page_actions(
             self.touch_page,
-            row=1,
+            row=2,
             page="touch",
             dirty_var=self.touch_dirty_var,
             status_var=self.touch_page_status_var,
@@ -455,7 +572,7 @@ class DeviceConfigWindow:
     ) -> None:
         actions = ttk.Frame(parent)
         actions.grid(row=row, column=0, columnspan=2, pady=(12, 0), sticky="ew")
-        actions.columnconfigure(4, weight=1)
+        actions.columnconfigure(5, weight=1)
         read_button = ttk.Button(
             actions,
             text="重新读取",
@@ -474,13 +591,21 @@ class DeviceConfigWindow:
             command=lambda selected=page: self.apply_page(selected, save=True),
         )
         save_button.grid(row=0, column=2, padx=6)
+        restore_button = ttk.Button(
+            actions,
+            text="恢复默认",
+            command=lambda selected=page: self.restore_page_defaults(selected),
+        )
+        restore_button.grid(row=0, column=3, padx=6)
         ttk.Label(actions, textvariable=dirty_var).grid(
-            row=0, column=3, padx=(12, 8), sticky="w"
+            row=0, column=4, padx=(12, 8), sticky="w"
         )
         ttk.Label(actions, textvariable=status_var, foreground="#455A64").grid(
-            row=0, column=4, sticky="e"
+            row=0, column=5, sticky="e"
         )
-        self.page_buttons[page].extend((read_button, apply_button, save_button))
+        self.page_buttons[page].extend(
+            (read_button, apply_button, save_button, restore_button)
+        )
 
     def refresh_devices(self, show_error: bool = True) -> None:
         """Refresh serial labels while retaining a still-present manual choice."""
@@ -566,6 +691,8 @@ class DeviceConfigWindow:
             return
         self.disconnecting = True
         self.operation_pending = False
+        self.touch_status_pending = False
+        self._cancel_touch_status_poll()
         self._set_status("正在断开配置串口…", "#1565C0")
         self._discard_worker_commands(handle)
         handle.commands.put(_WorkerCommand("disconnect"))
@@ -591,6 +718,18 @@ class DeviceConfigWindow:
                 command = handle.commands.get()
                 if command.kind == "disconnect":
                     break
+                if command.kind == "status":
+                    try:
+                        value = controller.read_touch_runtime_status()
+                    except Exception as error:
+                        self.worker_events.put(
+                            ("status-error", handle.generation, str(error))
+                        )
+                    else:
+                        self.worker_events.put(
+                            ("status-complete", handle.generation, value)
+                        )
+                    continue
                 if command.kind == "read":
                     value = self._worker_read_page(controller, command.page)
                     self.worker_events.put(
@@ -613,6 +752,16 @@ class DeviceConfigWindow:
                             "apply-complete",
                             handle.generation,
                             (command.page, command.value, command.save),
+                        )
+                    )
+                    continue
+                if command.kind == "restore":
+                    value = self._worker_restore_page(controller, command.page)
+                    self.worker_events.put(
+                        (
+                            "restore-complete",
+                            handle.generation,
+                            (command.page, value),
                         )
                     )
         except Exception as error:
@@ -657,6 +806,16 @@ class DeviceConfigWindow:
             return
         raise ValueError("未知配置页")
 
+    @staticmethod
+    def _worker_restore_page(controller: Any, page: ConfigPage | None) -> Any:
+        if page == "touch":
+            return controller.restore_touch_defaults()
+        if page == "led":
+            return controller.restore_led_defaults()
+        if page == "keyboard":
+            return controller.restore_keyboard_defaults()
+        raise ValueError("未知配置页")
+
     def read_page(self, page: ConfigPage) -> None:
         if not self._can_start_operation():
             return
@@ -690,6 +849,123 @@ class DeviceConfigWindow:
         self._set_page_status(page, f"正在{operation}…")
         handle.commands.put(_WorkerCommand("apply", page=page, value=value, save=save))
         self._update_widgets()
+
+    def restore_page_defaults(self, page: ConfigPage) -> None:
+        if not self._can_start_operation():
+            return
+        page_name = {"touch": "Touch", "led": "LED", "keyboard": "按键"}[page]
+        if not messagebox.askyesno(
+            "恢复默认配置",
+            f"将 {page_name} 配置恢复为固件默认值并临时应用到 RAM。"
+            "本次操作不会保存到 Flash，是否继续？",
+            parent=self.root,
+        ):
+            return
+        handle = self.handle
+        if handle is None:
+            return
+        self.operation_pending = True
+        self._set_page_status(page, "正在恢复默认值…")
+        handle.commands.put(_WorkerCommand("restore", page=page))
+        self._update_widgets()
+
+    def export_configuration(self) -> None:
+        if not self._can_start_operation():
+            return
+        try:
+            snapshot = self._current_draft_snapshot()
+        except (TypeError, ValueError) as error:
+            messagebox.showerror("配置无效", str(error), parent=self.root)
+            return
+        filename = (
+            "TenoDX_config_"
+            f"{datetime.now(timezone.utc).astimezone().strftime('%Y%m%d_%H%M%S')}"
+            f"{CONFIG_FILE_EXTENSION}"
+        )
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="导出 TenoDX 配置",
+            defaultextension=CONFIG_FILE_EXTENSION,
+            initialfile=filename,
+            filetypes=(
+                ("TenoDX 配置", f"*{CONFIG_FILE_EXTENSION}"),
+                ("JSON 文件", "*.json"),
+                ("所有文件", "*.*"),
+            ),
+        )
+        if not path:
+            return
+        try:
+            write_config_file(path, snapshot)
+        except (OSError, TypeError, ValueError) as error:
+            messagebox.showerror(
+                "导出配置失败",
+                str(error),
+                parent=self.root,
+            )
+            return
+        self._set_status(f"配置已导出：{path}", "#2E7D32")
+
+    def import_configuration(self) -> None:
+        if not self._can_start_operation():
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="导入 TenoDX 配置",
+            filetypes=(
+                ("TenoDX 配置", f"*{CONFIG_FILE_EXTENSION}"),
+                ("JSON 文件", "*.json"),
+                ("所有文件", "*.*"),
+            ),
+        )
+        if not path:
+            return
+        try:
+            snapshot = read_config_file(path)
+        except (OSError, ConfigFileError) as error:
+            messagebox.showerror(
+                "导入配置失败",
+                str(error),
+                parent=self.root,
+            )
+            return
+        if any(self._page_is_dirty(page) for page in self.page_buttons) and not (
+            messagebox.askyesno(
+                "覆盖本地修改",
+                "导入会覆盖三个页面尚未应用的本地修改，是否继续？",
+                parent=self.root,
+            )
+        ):
+            return
+        self._load_imported_snapshot(snapshot)
+        for page in self.page_buttons:
+            self._set_page_status(page, "已导入，尚未应用到设备")
+        self._set_status(
+            f"配置已导入：{path}；尚未写入设备",
+            "#1565C0",
+        )
+
+    def _current_draft_snapshot(self) -> DeviceConfigSnapshot:
+        if (
+            self.touch_device_config is None
+            or self.led_device_config is None
+            or self.keyboard_device_config is None
+        ):
+            raise ValueError("必须先成功读取 Touch、LED 和按键配置")
+        cdc_mode = self.touch_cdc_mode_var.get()
+        if cdc_mode not in (TOUCH_CDC_MODE_RAW, TOUCH_CDC_MODE_MAI2TOUCH):
+            raise ValueError("Touch CDC 输出模式无效")
+        return DeviceConfigSnapshot(
+            touch=TouchConfig(entries=tuple(self.touch_draft), cdc_mode=cdc_mode),
+            led=self._current_led_config(),
+            keyboard=self._current_keyboard_config(),
+        )
+
+    def _load_imported_snapshot(self, snapshot: DeviceConfigSnapshot) -> None:
+        self.imported_pending = {"touch", "led", "keyboard"}
+        self._set_touch_draft(snapshot.touch)
+        self._set_led_draft(snapshot.led)
+        self._set_keyboard_draft(snapshot.keyboard)
 
     def _can_start_operation(self) -> bool:
         if not self.connected or self.handle is None:
@@ -725,6 +1001,139 @@ class DeviceConfigWindow:
             return self._current_keyboard_config()
         raise ValueError("未知配置页")
 
+    def _touch_page_is_selected(self) -> bool:
+        return self.notebook.select() == str(self.touch_page)
+
+    def _cancel_touch_status_poll(self) -> None:
+        if self.touch_status_after_id is not None:
+            with suppress(tk.TclError):
+                self.root.after_cancel(self.touch_status_after_id)
+            self.touch_status_after_id = None
+
+    def _schedule_touch_status_poll(self, delay_ms: int) -> None:
+        if (
+            self.closed
+            or not self.connected
+            or self.disconnecting
+            or not self.touch_status_supported
+            or not self._touch_page_is_selected()
+            or self.touch_status_after_id is not None
+        ):
+            return
+        self.touch_status_after_id = self.root.after(
+            delay_ms, self._poll_touch_status
+        )
+
+    def _on_notebook_tab_changed(self, _event: tk.Event[Any]) -> None:
+        if self._touch_page_is_selected():
+            self._schedule_touch_status_poll(0)
+        else:
+            self._cancel_touch_status_poll()
+
+    def _poll_touch_status(self) -> None:
+        self.touch_status_after_id = None
+        if (
+            self.closed
+            or not self.connected
+            or self.disconnecting
+            or not self.touch_status_supported
+            or not self._touch_page_is_selected()
+        ):
+            return
+        if self.touch_status_pending or self.operation_pending:
+            self._schedule_touch_status_poll(TOUCH_STATUS_POLL_INTERVAL_MS)
+            return
+        handle = self.handle
+        if handle is None:
+            return
+        self.touch_status_pending = True
+        handle.commands.put(_WorkerCommand("status"))
+
+    def _reset_touch_status_display(self, message: str = "未连接") -> None:
+        self.touch_controller_status_var.set(f"STM32 Touch 状态机：{message}")
+        self.touch_controller_status_label.configure(foreground="#455A64")
+        for index, label in enumerate(self.psoc_status_labels):
+            self.psoc_status_vars[index].set(f"PSoC{index}：{message}")
+            label.configure(foreground="#455A64")
+
+    def _render_touch_runtime_status(self, status: TouchRuntimeStatus) -> None:
+        state_name = TOUCH_STATE_NAMES.get(status.state, "未知状态")
+        reinit = "是" if status.flags & TOUCH_STATUS_FLAG_REINIT_REQUESTED else "否"
+        reading = "是" if status.flags & TOUCH_STATUS_FLAG_READ_INFLIGHT else "否"
+        self.touch_controller_status_var.set(
+            f"STM32 Touch 状态机：{status.state}（{state_name}）  "
+            f"重初始化={reinit}  I²C读取中={reading}"
+        )
+        controller_color = (
+            "#2E7D32" if status.state == 6 else
+            "#AD5700" if status.state == 7 else
+            "#1565C0"
+        )
+        self.touch_controller_status_label.configure(
+            foreground=controller_color
+        )
+
+        for index, device in enumerate(status.devices):
+            connected = bool(device.flags & PSOC_STATUS_FLAG_CONNECTED)
+            operational = bool(device.flags & PSOC_STATUS_FLAG_OPERATIONAL)
+            unavailable = bool(device.flags & PSOC_STATUS_FLAG_UNAVAILABLE)
+            valid = bool(device.flags & PSOC_STATUS_FLAG_VALID)
+            power_cycle = bool(
+                device.flags & PSOC_STATUS_FLAG_POWER_CYCLE_REQUIRED
+            )
+
+            link_text = "已连接" if connected else "未连接"
+            run_text = "运行中" if operational else "未运行"
+            if unavailable:
+                run_text += " / 恢复中"
+
+            if valid:
+                meaning = PSOC_STATUS_NAMES.get(device.raw_status, "未知值")
+                raw_text = f"0x{device.raw_status:02X}（{meaning}）"
+                age_text = (
+                    "≥ 65.5 秒"
+                    if device.status_age_ms == 0xFFFF
+                    else f"{device.status_age_ms} ms 前"
+                )
+            else:
+                raw_text = "无有效数据"
+                age_text = "未知"
+
+            if device.flags & PSOC_STATUS_FLAG_SOFT_RESET_SUPPORTED:
+                firmware_text = "新版（支持软复位）"
+            elif device.flags & PSOC_STATUS_FLAG_LEGACY_FIRMWARE:
+                firmware_text = "旧版（需断电重启）"
+            else:
+                firmware_text = "未知"
+
+            if power_cycle:
+                config_text = "需要断电重连后应用"
+            elif operational:
+                config_text = "已应用"
+            elif connected:
+                config_text = "初始化/应用中"
+            else:
+                config_text = "未知"
+
+            self.psoc_status_vars[index].set(
+                f"连接：{link_text}    工作：{run_text}\n"
+                f"原始状态：{raw_text}\n"
+                f"固件：{firmware_text}\n"
+                f"连续 I²C 失败：{device.consecutive_failures}    "
+                f"最后更新：{age_text}\n"
+                f"配置：{config_text}"
+            )
+
+            if power_cycle:
+                color = "#AD5700"
+            elif not connected or unavailable:
+                color = "#C62828"
+            elif operational and device.raw_status == 0x02:
+                color = "#2E7D32"
+            else:
+                color = "#1565C0"
+            self.psoc_status_labels[index].configure(foreground=color)
+
     def _schedule_worker_poll(self) -> None:
         if self.closed:
             return
@@ -752,8 +1161,23 @@ class DeviceConfigWindow:
             self.connected = True
             self.disconnecting = False
             self.operation_pending = False
+            self.touch_status_pending = False
+            self.touch_status_supported = True
             self._load_snapshot(payload)
             self._set_status("配置串口已连接", "#2E7D32")
+            self._reset_touch_status_display("正在读取…")
+            self._schedule_touch_status_poll(0)
+        elif kind == "status-complete":
+            self.touch_status_pending = False
+            self._render_touch_runtime_status(payload)
+            self._schedule_touch_status_poll(TOUCH_STATUS_POLL_INTERVAL_MS)
+        elif kind == "status-error":
+            self.touch_status_pending = False
+            self.touch_status_supported = False
+            self._reset_touch_status_display(f"状态监控不可用：{payload}")
+            self.touch_controller_status_label.configure(foreground="#C62828")
+            for label in self.psoc_status_labels:
+                label.configure(foreground="#C62828")
         elif kind == "read-complete":
             page, value = payload
             self.operation_pending = False
@@ -765,10 +1189,21 @@ class DeviceConfigWindow:
             self._accept_applied_value(page, value)
             action = "已应用并保存到 Flash" if save else "已临时应用到 RAM"
             self._set_page_status(page, action)
+            if page == "touch":
+                self._cancel_touch_status_poll()
+                self._schedule_touch_status_poll(0)
+        elif kind == "restore-complete":
+            page, value = payload
+            self.operation_pending = False
+            self._load_page(page, value)
+            self._set_page_status(page, "已恢复默认值，尚未保存到 Flash")
         elif kind == "error":
             self.operation_pending = False
             self.connecting = False
             self.connected = False
+            self.touch_status_pending = False
+            self._cancel_touch_status_poll()
+            self._reset_touch_status_display("连接错误")
             self._set_status(f"配置操作失败：{payload}", "#C62828")
             if not self.closed and not self.disconnecting:
                 messagebox.showerror(
@@ -783,6 +1218,9 @@ class DeviceConfigWindow:
             self.connected = False
             self.disconnecting = False
             self.operation_pending = False
+            self.touch_status_pending = False
+            self._cancel_touch_status_poll()
+            self._reset_touch_status_display()
             self.handle = None
             if not self.status_var.get().startswith("配置操作失败"):
                 self._set_status("配置串口已断开", "#455A64")
@@ -790,11 +1228,13 @@ class DeviceConfigWindow:
 
     def _load_snapshot(self, snapshot: DeviceConfigSnapshot) -> None:
         self.snapshot = snapshot
+        self.imported_pending.clear()
         self._load_touch(snapshot.touch)
         self._load_led(snapshot.led)
         self._load_keyboard(snapshot.keyboard)
 
     def _load_page(self, page: ConfigPage, value: Any) -> None:
+        self.imported_pending.discard(page)
         if page == "touch":
             self._load_touch(value)
         elif page == "led":
@@ -804,6 +1244,9 @@ class DeviceConfigWindow:
 
     def _load_touch(self, config: TouchConfig) -> None:
         self.touch_device_config = config
+        self._set_touch_draft(config)
+
+    def _set_touch_draft(self, config: TouchConfig) -> None:
         self.touch_draft = list(config.entries)
         self.loading_controls = True
         try:
@@ -830,6 +1273,9 @@ class DeviceConfigWindow:
 
     def _load_led(self, config: LedConfig) -> None:
         self.led_device_config = config
+        self._set_led_draft(config)
+
+    def _set_led_draft(self, config: LedConfig) -> None:
         self.loading_controls = True
         try:
             self.led_per_bit_var.set(str(config.led_per_bit))
@@ -840,6 +1286,9 @@ class DeviceConfigWindow:
 
     def _load_keyboard(self, config: KeyboardConfig) -> None:
         self.keyboard_device_config = config
+        self._set_keyboard_draft(config)
+
+    def _set_keyboard_draft(self, config: KeyboardConfig) -> None:
         self.loading_controls = True
         try:
             self.keyboard_layout_var.set(
@@ -973,7 +1422,10 @@ class DeviceConfigWindow:
                 != self.touch_device_config.cdc_mode
             )
         )
-        self.touch_dirty_var.set("有未应用修改" if dirty else "已与设备同步")
+        if "touch" in self.imported_pending:
+            self.touch_dirty_var.set("已导入，尚未应用")
+        else:
+            self.touch_dirty_var.set("有未应用修改" if dirty else "已与设备同步")
 
     def _update_led_dirty(self) -> None:
         try:
@@ -986,7 +1438,10 @@ class DeviceConfigWindow:
             f"物理灯珠总数：{LOGICAL_LED_COUNT * led_per_bit}"
         )
         dirty = self.led_device_config is not None and current != self.led_device_config
-        self.led_dirty_var.set("有未应用修改" if dirty else "已与设备同步")
+        if "led" in self.imported_pending:
+            self.led_dirty_var.set("已导入，尚未应用")
+        else:
+            self.led_dirty_var.set("有未应用修改" if dirty else "已与设备同步")
 
     def _update_keyboard_dirty(self) -> None:
         try:
@@ -997,7 +1452,12 @@ class DeviceConfigWindow:
             self.keyboard_device_config is not None
             and current != self.keyboard_device_config
         )
-        self.keyboard_dirty_var.set("有未应用修改" if dirty else "已与设备同步")
+        if "keyboard" in self.imported_pending:
+            self.keyboard_dirty_var.set("已导入，尚未应用")
+        else:
+            self.keyboard_dirty_var.set(
+                "有未应用修改" if dirty else "已与设备同步"
+            )
 
     def _page_is_dirty(self, page: ConfigPage) -> bool:
         variable = {
@@ -1005,9 +1465,10 @@ class DeviceConfigWindow:
             "led": self.led_dirty_var,
             "keyboard": self.keyboard_dirty_var,
         }[page]
-        return variable.get() == "有未应用修改"
+        return variable.get() in ("有未应用修改", "已导入，尚未应用")
 
     def _accept_applied_value(self, page: ConfigPage, value: Any) -> None:
+        self.imported_pending.discard(page)
         if page == "touch":
             if self.touch_device_config is None:
                 raise RuntimeError("尚未读取 Touch 配置")
@@ -1072,11 +1533,14 @@ class DeviceConfigWindow:
         for buttons in self.page_buttons.values():
             for button in buttons:
                 button.configure(state="normal" if active else "disabled")
+        for button in self.config_file_buttons:
+            button.configure(state="normal" if active else "disabled")
 
     def close(self) -> None:
         if self.closed:
             return
         self.closed = True
+        self._cancel_touch_status_poll()
         if self.worker_poll_after_id is not None:
             with suppress(tk.TclError):
                 self.root.after_cancel(self.worker_poll_after_id)

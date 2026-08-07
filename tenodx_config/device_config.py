@@ -21,11 +21,13 @@ KEYBOARD_MODULE = 0x40
 READ_COMMAND = 0x01
 WRITE_COMMAND = 0x02
 SAVE_COMMAND = 0x03
+LOAD_DEFAULT_COMMAND = 0x04
 GET_INFO_COMMAND = 0x05
 
 TOUCH_MAPPING_PARAM = 0x01
 TOUCH_CDC_MODE_PARAM = 0x02
 TOUCH_BATCH_PARAM = 0x03
+TOUCH_PSOC_STATUS_PARAM = 0x04
 LED_PER_BIT_PARAM = 0x01
 LED_RAINBOW_PARAM = 0x02
 KEYBOARD_EK_PARAM = 0x80
@@ -37,6 +39,19 @@ TOUCH_ENTRY_LENGTH = 2
 TOUCH_MAPPING_LENGTH = TOUCH_CHANNEL_COUNT * TOUCH_ENTRY_LENGTH
 TOUCH_BATCH_RECORD_LENGTH = TOUCH_ENTRY_LENGTH + 1
 TOUCH_PAYLOAD_VERSION = 2
+TOUCH_STATUS_PAYLOAD_VERSION = 1
+TOUCH_STATUS_PAYLOAD_LENGTH = 16
+TOUCH_STATUS_DEVICE_LENGTH = 6
+
+TOUCH_STATUS_FLAG_REINIT_REQUESTED = 0x01
+TOUCH_STATUS_FLAG_READ_INFLIGHT = 0x02
+PSOC_STATUS_FLAG_CONNECTED = 0x01
+PSOC_STATUS_FLAG_OPERATIONAL = 0x02
+PSOC_STATUS_FLAG_UNAVAILABLE = 0x04
+PSOC_STATUS_FLAG_VALID = 0x08
+PSOC_STATUS_FLAG_SOFT_RESET_SUPPORTED = 0x10
+PSOC_STATUS_FLAG_LEGACY_FIRMWARE = 0x20
+PSOC_STATUS_FLAG_POWER_CYCLE_REQUIRED = 0x40
 
 TOUCH_CDC_MODE_RAW = 0
 TOUCH_CDC_MODE_MAI2TOUCH = 1
@@ -189,6 +204,45 @@ class TouchConfig:
             raise ValueError("cdc_mode must be RAW or Mai2Touch")
         object.__setattr__(self, "entries", entries)
         object.__setattr__(self, "cdc_mode", cdc_mode)
+
+
+@dataclass(frozen=True)
+class PsocRuntimeStatus:
+    """Cached runtime state for one PSoC, returned without extra I2C traffic."""
+
+    address: int
+    raw_status: int
+    flags: int
+    consecutive_failures: int
+    status_age_ms: int
+
+    def __post_init__(self) -> None:
+        _require_byte(self.address, "address")
+        _require_byte(self.raw_status, "raw_status")
+        _require_byte(self.flags, "flags")
+        _require_byte(self.consecutive_failures, "consecutive_failures")
+        age = _require_plain_int(self.status_age_ms, "status_age_ms")
+        if not 0 <= age <= 0xFFFF:
+            raise ValueError("status_age_ms must be between 0 and 65535")
+
+
+@dataclass(frozen=True)
+class TouchRuntimeStatus:
+    """STM32 Touch state machine plus both independent PSoC snapshots."""
+
+    state: int
+    flags: int
+    devices: tuple[PsocRuntimeStatus, PsocRuntimeStatus]
+
+    def __post_init__(self) -> None:
+        _require_byte(self.state, "state")
+        _require_byte(self.flags, "flags")
+        devices = tuple(self.devices)
+        if len(devices) != 2:
+            raise ValueError("devices must contain exactly two PSoC states")
+        if any(not isinstance(device, PsocRuntimeStatus) for device in devices):
+            raise TypeError("devices must contain PsocRuntimeStatus values")
+        object.__setattr__(self, "devices", devices)
 
 
 @dataclass(frozen=True)
@@ -356,6 +410,44 @@ def decode_touch_cdc_mode(payload: bytes) -> int:
     except ValueError as error:
         raise DeviceConfigError(f"invalid Touch CDC mode: {raw[0]}") from error
     return raw[0]
+
+
+def decode_touch_runtime_status(payload: bytes) -> TouchRuntimeStatus:
+    """Decode the fixed 16-byte versioned Touch/PSoC status snapshot."""
+
+    raw = _payload_bytes(payload)
+    if len(raw) != TOUCH_STATUS_PAYLOAD_LENGTH:
+        raise DeviceConfigError(
+            "touch runtime status length mismatch: "
+            f"{len(raw)} != {TOUCH_STATUS_PAYLOAD_LENGTH}"
+        )
+    if raw[0] != TOUCH_STATUS_PAYLOAD_VERSION:
+        raise DeviceConfigError(
+            f"unsupported touch runtime status version: {raw[0]}"
+        )
+    if raw[3] != 2:
+        raise DeviceConfigError(
+            f"touch runtime status device count must be 2, got {raw[3]}"
+        )
+
+    devices: list[PsocRuntimeStatus] = []
+    for index in range(2):
+        offset = 4 + index * TOUCH_STATUS_DEVICE_LENGTH
+        devices.append(
+            PsocRuntimeStatus(
+                address=raw[offset],
+                raw_status=raw[offset + 1],
+                flags=raw[offset + 2],
+                consecutive_failures=raw[offset + 3],
+                status_age_ms=raw[offset + 4] | (raw[offset + 5] << 8),
+            )
+        )
+
+    return TouchRuntimeStatus(
+        state=raw[1],
+        flags=raw[2],
+        devices=(devices[0], devices[1]),
+    )
 
 
 def encode_touch_batch(changes: Mapping[int, TouchMapEntry]) -> bytes:
@@ -542,6 +634,15 @@ class DeviceConfigController:
             cdc_mode=decode_touch_cdc_mode(cdc_mode.payload),
         )
 
+    def read_touch_runtime_status(self) -> TouchRuntimeStatus:
+        response = self._request(
+            TOUCH_MODULE,
+            READ_COMMAND,
+            TOUCH_PSOC_STATUS_PARAM,
+            expected_length=TOUCH_STATUS_PAYLOAD_LENGTH,
+        )
+        return decode_touch_runtime_status(response.payload)
+
     def apply_touch(
         self,
         changes: Mapping[int, TouchMapEntry],
@@ -569,6 +670,10 @@ class DeviceConfigController:
 
     def save_touch(self) -> None:
         self._save(TOUCH_MODULE)
+
+    def restore_touch_defaults(self) -> TouchConfig:
+        self._load_default(TOUCH_MODULE)
+        return self.read_touch()
 
     def read_led(self) -> LedConfig:
         led_per_bit = self._request(
@@ -598,6 +703,10 @@ class DeviceConfigController:
 
     def save_led(self) -> None:
         self._save(LED_MODULE)
+
+    def restore_led_defaults(self) -> LedConfig:
+        self._load_default(LED_MODULE)
+        return self.read_led()
 
     def read_keyboard(self) -> KeyboardConfig:
         keycodes = self._request(
@@ -634,6 +743,10 @@ class DeviceConfigController:
     def save_keyboard(self) -> None:
         self._save(KEYBOARD_MODULE)
 
+    def restore_keyboard_defaults(self) -> KeyboardConfig:
+        self._load_default(KEYBOARD_MODULE)
+        return self.read_keyboard()
+
     def _write_byte(self, module: int, param: int, value: int) -> None:
         self._request(
             module,
@@ -647,6 +760,14 @@ class DeviceConfigController:
         self._request(
             module,
             SAVE_COMMAND,
+            SAVE_ALL_PARAM,
+            expected_payload=b"",
+        )
+
+    def _load_default(self, module: int) -> None:
+        self._request(
+            module,
+            LOAD_DEFAULT_COMMAND,
             SAVE_ALL_PARAM,
             expected_payload=b"",
         )

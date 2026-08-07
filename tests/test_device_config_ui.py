@@ -1,24 +1,35 @@
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
 import tkinter as tk
 import unittest
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from tenodx_config.config_file import read_config_file, write_config_file
 from tenodx_config.device_config import (
     LAYOUT_1P,
     LAYOUT_2P,
+    PSOC_STATUS_FLAG_CONNECTED,
+    PSOC_STATUS_FLAG_LEGACY_FIRMWARE,
+    PSOC_STATUS_FLAG_OPERATIONAL,
+    PSOC_STATUS_FLAG_POWER_CYCLE_REQUIRED,
+    PSOC_STATUS_FLAG_SOFT_RESET_SUPPORTED,
+    PSOC_STATUS_FLAG_VALID,
     TOUCH_CDC_MODE_MAI2TOUCH,
     TOUCH_CDC_MODE_RAW,
     TOUCH_ZONE_NAMES,
     DeviceConfigSnapshot,
     KeyboardConfig,
     LedConfig,
+    PsocRuntimeStatus,
     TouchConfig,
     TouchMapEntry,
+    TouchRuntimeStatus,
 )
 from tenodx_config.device_config_ui import (
     DeviceConfigWindow,
@@ -46,12 +57,47 @@ def make_snapshot() -> DeviceConfigSnapshot:
     )
 
 
+def make_runtime_status() -> TouchRuntimeStatus:
+    return TouchRuntimeStatus(
+        state=6,
+        flags=0x02,
+        devices=(
+            PsocRuntimeStatus(
+                address=0x08,
+                raw_status=0x02,
+                flags=(
+                    PSOC_STATUS_FLAG_CONNECTED
+                    | PSOC_STATUS_FLAG_OPERATIONAL
+                    | PSOC_STATUS_FLAG_VALID
+                    | PSOC_STATUS_FLAG_SOFT_RESET_SUPPORTED
+                ),
+                consecutive_failures=0,
+                status_age_ms=8,
+            ),
+            PsocRuntimeStatus(
+                address=0x09,
+                raw_status=0x02,
+                flags=(
+                    PSOC_STATUS_FLAG_CONNECTED
+                    | PSOC_STATUS_FLAG_OPERATIONAL
+                    | PSOC_STATUS_FLAG_VALID
+                    | PSOC_STATUS_FLAG_LEGACY_FIRMWARE
+                    | PSOC_STATUS_FLAG_POWER_CYCLE_REQUIRED
+                ),
+                consecutive_failures=1,
+                status_age_ms=12,
+            ),
+        ),
+    )
+
+
 class FakeController:
     def __init__(self, port: str, snapshot: DeviceConfigSnapshot) -> None:
         self.port = port
         self.touch = snapshot.touch
         self.led = snapshot.led
         self.keyboard = snapshot.keyboard
+        self.runtime_status = make_runtime_status()
         self.calls: list[tuple[object, ...]] = [("open", port)]
         self.thread_ids: list[int] = []
 
@@ -69,6 +115,10 @@ class FakeController:
     def read_touch(self) -> TouchConfig:
         self._record("read_touch")
         return self.touch
+
+    def read_touch_runtime_status(self) -> TouchRuntimeStatus:
+        self._record("read_touch_runtime_status")
+        return self.runtime_status
 
     def apply_touch(
         self,
@@ -89,6 +139,11 @@ class FakeController:
     def save_touch(self) -> None:
         self._record("save_touch")
 
+    def restore_touch_defaults(self) -> TouchConfig:
+        self._record("restore_touch_defaults")
+        self.touch = make_touch_config()
+        return self.touch
+
     def read_led(self) -> LedConfig:
         self._record("read_led")
         return self.led
@@ -100,6 +155,11 @@ class FakeController:
     def save_led(self) -> None:
         self._record("save_led")
 
+    def restore_led_defaults(self) -> LedConfig:
+        self._record("restore_led_defaults")
+        self.led = LedConfig(led_per_bit=2, rainbow_enabled=True)
+        return self.led
+
     def read_keyboard(self) -> KeyboardConfig:
         self._record("read_keyboard")
         return self.keyboard
@@ -110,6 +170,14 @@ class FakeController:
 
     def save_keyboard(self) -> None:
         self._record("save_keyboard")
+
+    def restore_keyboard_defaults(self) -> KeyboardConfig:
+        self._record("restore_keyboard_defaults")
+        self.keyboard = KeyboardConfig(
+            main_layout=LAYOUT_1P,
+            ek_keycodes=(0x20, 0x55, 0x25, 0x26),
+        )
+        return self.keyboard
 
     def close(self) -> None:
         self._record("close")
@@ -215,9 +283,16 @@ class DeviceConfigWindowTests(unittest.TestCase):
             self.assertTrue(controllers[0].thread_ids)
             self.assertNotIn(main_thread, controllers[0].thread_ids)
             self.assertEqual(
-                controllers[0].calls,
+                controllers[0].calls[:3],
                 [("open", "COM12"), ("probe",), ("read_snapshot",)],
             )
+            wait_for_tk(
+                root,
+                lambda: "运行中" in app.touch_controller_status_var.get(),
+            )
+            self.assertIn("新版", app.psoc_status_vars[0].get())
+            self.assertIn("旧版", app.psoc_status_vars[1].get())
+            self.assertIn("需要断电重连", app.psoc_status_vars[1].get())
             self.assertEqual(app.touch_dirty_var.get(), "已与设备同步")
             self.assertEqual(
                 app.touch_cdc_mode_var.get(), TOUCH_CDC_MODE_MAI2TOUCH
@@ -401,6 +476,139 @@ class DeviceConfigWindowTests(unittest.TestCase):
             self.assertEqual(app.touch_draft[0], TouchMapEntry("C1"))
             self.assertEqual(app.led_per_bit_var.get(), "3")
             self.assertEqual(app.led_dirty_var.get(), "有未应用修改")
+        finally:
+            if app is not None:
+                app.close()
+            else:
+                root.destroy()
+
+    def test_restore_defaults_reads_back_ram_without_saving(self) -> None:
+        root = self._root()
+        controllers: list[FakeController] = []
+        app: DeviceConfigWindow | None = None
+
+        def factory(port: str) -> FakeController:
+            controller = FakeController(port, make_snapshot())
+            controllers.append(controller)
+            return controller
+
+        try:
+            app = DeviceConfigWindow(
+                root,
+                controller_factory=factory,
+                port_provider=lambda: [self._port()],
+                bus_description_provider=lambda: {},
+            )
+            app.port_var.set(next(iter(app.serial_ports_by_label)))
+            app.connect()
+            wait_for_tk(root, lambda: app.connected)
+
+            with patch(
+                "tenodx_config.device_config_ui.messagebox.askyesno",
+                return_value=True,
+            ):
+                app.restore_page_defaults("led")
+            wait_for_tk(root, lambda: not app.operation_pending)
+
+            self.assertIn(("restore_led_defaults",), controllers[0].calls)
+            self.assertNotIn(("save_led",), controllers[0].calls)
+            self.assertEqual(app.led_per_bit_var.get(), "2")
+            self.assertTrue(app.led_rainbow_var.get())
+            self.assertIn("尚未保存", app.led_page_status_var.get())
+        finally:
+            if app is not None:
+                app.close()
+            else:
+                root.destroy()
+
+    def test_export_draft_and_import_complete_config_without_device_writes(self) -> None:
+        root = self._root()
+        controllers: list[FakeController] = []
+        app: DeviceConfigWindow | None = None
+
+        def factory(port: str) -> FakeController:
+            controller = FakeController(port, make_snapshot())
+            controllers.append(controller)
+            return controller
+
+        try:
+            app = DeviceConfigWindow(
+                root,
+                controller_factory=factory,
+                port_provider=lambda: [self._port()],
+                bus_description_provider=lambda: {},
+            )
+            app.port_var.set(next(iter(app.serial_ports_by_label)))
+            app.connect()
+            wait_for_tk(root, lambda: app.connected)
+            controller = controllers[0]
+
+            app.touch_cdc_mode_var.set(TOUCH_CDC_MODE_RAW)
+            app._on_touch_mode_changed()
+            app.led_per_bit_var.set("4")
+            app.led_rainbow_var.set(True)
+            app._on_led_changed()
+
+            with tempfile.TemporaryDirectory() as directory:
+                export_path = Path(directory, "export.tenodx.json")
+                with patch(
+                    "tenodx_config.device_config_ui.filedialog.asksaveasfilename",
+                    return_value=str(export_path),
+                ):
+                    app.export_configuration()
+                exported = read_config_file(export_path)
+                self.assertEqual(exported.touch.cdc_mode, TOUCH_CDC_MODE_RAW)
+                self.assertEqual(exported.led, LedConfig(4, True))
+                self.assertEqual(exported.keyboard.ek_keycodes[0], 0xFE)
+
+                imported = DeviceConfigSnapshot(
+                    touch=TouchConfig(
+                        entries=tuple(TouchMapEntry("E8") for _ in range(34)),
+                        cdc_mode=TOUCH_CDC_MODE_MAI2TOUCH,
+                    ),
+                    led=LedConfig(3, False),
+                    keyboard=KeyboardConfig(
+                        main_layout=LAYOUT_2P,
+                        ek_keycodes=(0xFD, 0x00, 0x04, 0x55),
+                    ),
+                )
+                import_path = Path(directory, "import.tenodx.json")
+                write_config_file(import_path, imported)
+                calls_before_import = list(controller.calls)
+                with (
+                    patch(
+                        "tenodx_config.device_config_ui.filedialog.askopenfilename",
+                        return_value=str(import_path),
+                    ),
+                    patch(
+                        "tenodx_config.device_config_ui.messagebox.askyesno",
+                        return_value=True,
+                    ),
+                ):
+                    app.import_configuration()
+
+                self.assertEqual(controller.calls, calls_before_import)
+                self.assertEqual(app.touch_draft[0], TouchMapEntry("E8"))
+                self.assertEqual(app.led_per_bit_var.get(), "3")
+                self.assertIn("0xFD", app.keyboard_ek_vars[0].get())
+                self.assertEqual(app.touch_dirty_var.get(), "已导入，尚未应用")
+                self.assertEqual(app.led_dirty_var.get(), "已导入，尚未应用")
+                self.assertEqual(app.keyboard_dirty_var.get(), "已导入，尚未应用")
+
+                app.apply_page("keyboard", save=False)
+                wait_for_tk(root, lambda: not app.operation_pending)
+                self.assertIn(
+                    (
+                        "apply_keyboard",
+                        KeyboardConfig(
+                            main_layout=LAYOUT_2P,
+                            ek_keycodes=(0xFD, 0x00, 0x04, 0x55),
+                        ),
+                    ),
+                    controller.calls,
+                )
+                self.assertEqual(app.keyboard_dirty_var.get(), "已与设备同步")
+                self.assertEqual(app.touch_dirty_var.get(), "已导入，尚未应用")
         finally:
             if app is not None:
                 app.close()

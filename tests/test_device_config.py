@@ -14,6 +14,7 @@ from tenodx_config.device_config import (
     LED_MODULE,
     LED_PER_BIT_PARAM,
     LED_RAINBOW_PARAM,
+    LOAD_DEFAULT_COMMAND,
     READ_COMMAND,
     SAVE_COMMAND,
     TOUCH_BATCH_PARAM,
@@ -24,18 +25,23 @@ from tenodx_config.device_config import (
     TOUCH_MAPPING_LENGTH,
     TOUCH_MAPPING_PARAM,
     TOUCH_MODULE,
+    TOUCH_PSOC_STATUS_PARAM,
+    TOUCH_STATUS_PAYLOAD_LENGTH,
     TOUCH_ZONE_NAMES,
     WRITE_COMMAND,
     DeviceConfigController,
     DeviceConfigError,
     KeyboardConfig,
     LedConfig,
+    PsocRuntimeStatus,
     TouchConfig,
     TouchMapEntry,
+    TouchRuntimeStatus,
     decode_touch_batch,
     decode_touch_cdc_mode,
     decode_touch_entry,
     decode_touch_mapping,
+    decode_touch_runtime_status,
     encode_touch_batch,
     encode_touch_cdc_mode,
     encode_touch_entry,
@@ -159,6 +165,35 @@ class TouchConfigCodecTests(unittest.TestCase):
             encode_touch_cdc_mode(2)
         with self.assertRaisesRegex(DeviceConfigError, "invalid Touch CDC mode"):
             decode_touch_cdc_mode(b"\x02")
+
+    def test_runtime_status_codec_decodes_two_independent_psocs(self) -> None:
+        payload = bytes(
+            (
+                1, 6, 0x02, 2,
+                0x08, 0x02, 0x1B, 0, 5, 0,
+                0x09, 0x15, 0x0D, 2, 0x34, 0x12,
+            )
+        )
+
+        status = decode_touch_runtime_status(payload)
+
+        self.assertEqual(
+            status,
+            TouchRuntimeStatus(
+                state=6,
+                flags=0x02,
+                devices=(
+                    PsocRuntimeStatus(0x08, 0x02, 0x1B, 0, 5),
+                    PsocRuntimeStatus(0x09, 0x15, 0x0D, 2, 0x1234),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(DeviceConfigError, "length mismatch"):
+            decode_touch_runtime_status(payload[:-1])
+        with self.assertRaisesRegex(DeviceConfigError, "unsupported.*version"):
+            decode_touch_runtime_status(bytes((2,)) + payload[1:])
+        with self.assertRaisesRegex(DeviceConfigError, "device count"):
+            decode_touch_runtime_status(payload[:3] + bytes((1,)) + payload[4:])
 
     def test_batch_allows_shared_region_and_round_trips_channel_records(self) -> None:
         shared = TouchMapEntry("C2")
@@ -341,6 +376,35 @@ class DeviceConfigControllerTests(unittest.TestCase):
             KeyboardConfig(LAYOUT_2P, (0x20, 0xAB, 0x25, 0)),
         )
 
+    def test_read_touch_runtime_status_uses_dedicated_parameter(self) -> None:
+        assert self.client is not None
+        payload = bytes(
+            (
+                1, 6, 0, 2,
+                0x08, 0x02, 0x0B, 0, 1, 0,
+                0x09, 0xFF, 0, 3, 0xFF, 0xFF,
+            )
+        )
+        self.assertEqual(len(payload), TOUCH_STATUS_PAYLOAD_LENGTH)
+        self.client.responses.append(
+            response(
+                TOUCH_MODULE,
+                READ_COMMAND,
+                TOUCH_PSOC_STATUS_PARAM,
+                payload,
+            )
+        )
+
+        status = self.controller.read_touch_runtime_status()
+
+        self.assertEqual(status.state, 6)
+        self.assertEqual(status.devices[0].address, 0x08)
+        self.assertEqual(status.devices[1].status_age_ms, 0xFFFF)
+        self.assertEqual(
+            self.client.requests[-1],
+            (TOUCH_MODULE, READ_COMMAND, TOUCH_PSOC_STATUS_PARAM, b""),
+        )
+
     def test_apply_touch_uses_batch_and_cdc_mode_and_empty_change_is_noop(
         self,
     ) -> None:
@@ -429,6 +493,61 @@ class DeviceConfigControllerTests(unittest.TestCase):
                     bytes((LAYOUT_1P,)),
                 ),
                 (KEYBOARD_MODULE, SAVE_COMMAND, 0, b""),
+            ],
+        )
+
+    def test_restore_defaults_uses_firmware_command_then_reads_back(self) -> None:
+        assert self.client is not None
+        touch = sample_touch_config()
+        self.client.responses.extend(
+            (
+                response(TOUCH_MODULE, LOAD_DEFAULT_COMMAND, 0),
+                response(
+                    TOUCH_MODULE,
+                    READ_COMMAND,
+                    TOUCH_MAPPING_PARAM,
+                    encode_touch_mapping(touch),
+                ),
+                response(
+                    TOUCH_MODULE,
+                    READ_COMMAND,
+                    TOUCH_CDC_MODE_PARAM,
+                    bytes((TOUCH_CDC_MODE_MAI2TOUCH,)),
+                ),
+                response(LED_MODULE, LOAD_DEFAULT_COMMAND, 0),
+                response(LED_MODULE, READ_COMMAND, LED_PER_BIT_PARAM, b"\x02"),
+                response(LED_MODULE, READ_COMMAND, LED_RAINBOW_PARAM, b"\x01"),
+                response(KEYBOARD_MODULE, LOAD_DEFAULT_COMMAND, 0),
+                response(
+                    KEYBOARD_MODULE,
+                    READ_COMMAND,
+                    KEYBOARD_EK_PARAM,
+                    bytes((0x20, 0x55, 0x25, 0x26)),
+                ),
+                response(
+                    KEYBOARD_MODULE,
+                    READ_COMMAND,
+                    KEYBOARD_LAYOUT_PARAM,
+                    bytes((LAYOUT_1P,)),
+                ),
+            )
+        )
+
+        self.assertEqual(self.controller.restore_touch_defaults(), touch)
+        self.assertEqual(
+            self.controller.restore_led_defaults(),
+            LedConfig(led_per_bit=2, rainbow_enabled=True),
+        )
+        self.assertEqual(
+            self.controller.restore_keyboard_defaults(),
+            KeyboardConfig(LAYOUT_1P, (0x20, 0x55, 0x25, 0x26)),
+        )
+        self.assertEqual(
+            [request for request in self.client.requests if request[1] == LOAD_DEFAULT_COMMAND],
+            [
+                (TOUCH_MODULE, LOAD_DEFAULT_COMMAND, 0, b""),
+                (LED_MODULE, LOAD_DEFAULT_COMMAND, 0, b""),
+                (KEYBOARD_MODULE, LOAD_DEFAULT_COMMAND, 0, b""),
             ],
         )
 

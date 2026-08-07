@@ -22,9 +22,9 @@ Aime 和 Mai2LED 的协议测试。
 
 ## 环境
 
-- Windows x64
+- Windows 10 22H2（19045）或 Windows 11 x64
 - Python 3.10 或更高版本
-- STM32 DFU 已绑定 WinUSB、libusbK 或兼容驱动
+- STM32 DFU 已绑定 WinUSB、libusbK 或兼容驱动；发布目录附带 ST 签名的 WinUSB 驱动
 - 以管理员权限运行，以便使用 Windows PnPUtil 卸载 DFU 设备节点
 
 安装 Python 依赖：
@@ -34,9 +34,17 @@ python -m pip install -r requirements.txt
 ```
 
 项目随附 `dfu-util 0.11` 和 `libusb-1.0.dll`，不依赖 STM32CubeProgrammer 或
-STM32CubeIDE。DFU 刷写后，应用端使用 Windows 自带的 `pnputil.exe` 精确卸载所选
-DFU 节点并同步扫描设备变化；随后仍以应用设备重新枚举且通过 Magic 验证作为成功
-条件。
+STM32CubeIDE。应用端通过 Windows PowerShell `Get-PnpDevice` 记录进入 DFU 前的设备
+基线，并取得 DFU 实例路径、物理位置和驱动服务；该流程不使用仅在新版 `pnputil` 中
+提供的 `/deviceid`、`/location` 或 `/format` 枚举参数。DFU 刷写后只使用 Windows
+自带 `pnputil.exe` 的 `/remove-device` 和 `/scan-devices` 卸载所选节点并同步扫描设备
+变化；随后仍以应用设备重新枚举且通过 Magic 验证作为成功条件。
+
+如果 DFU 设备在设备管理器中显示为 `STM Device in DFU Mode`，但程序在 20 秒内
+无法识别，通常是设备仍绑定旧版 DfuSe 驱动。请退出刷机程序，然后以管理员权限运行
+发布目录中的 `DFU-driver/install_dfu_driver.cmd`。脚本安装 STMicroelectronics 签名的
+`STM32 Bootloader` WinUSB 驱动、扫描硬件变化，并验证已连接的 `0483:DF11` 是否使用
+`WINUSB` 服务。切换后旧版 DfuSe 工具可能无法再访问该设备。
 
 ## 固件目录
 
@@ -83,15 +91,24 @@ python main.py config
 
 - Touch：为物理通道 `0`-`33` 分别选择一个逻辑区块（`A1`-`A8`、`B1`-`B8`、
   `C1`-`C2`、`D1`-`D8`、`E1`-`E8`）。同一区块允许被多个通道复用，扫描 Block
-  由所选区块自动确定并只读显示。
+  由所选区块自动确定并只读显示。该页还会每 500 ms 显示 STM32 Touch 状态机，
+  并分别显示 `0x08`、`0x09` 两颗 PSoC 的连接、原始状态、固件代际、I²C 失败数、
+  状态更新时间和配置是否需要断电重连后生效。
 - LED：设置每个逻辑灯对应的灯珠数量 `1`-`4`，显示物理灯珠总数 `8 × N`，并设置
   空闲彩虹效果开关。
 - 按键：整体选择主按键 `1P`/`2P` 布局，设置 `EK_1`-`EK_4` 的已知 HID 键值或禁用；
   `BTN1`-`BTN8` 仅供查看。
 
-每页都可以重新读取设备配置、临时应用到 RAM，或应用并保存到 Flash。Touch 页可在
-Mai2Touch 协议输出与 RAW 原始数据输出之间切换；模式选择不会自动写入设备，也不会重置
-PSoC。简易配置窗口不包含恢复默认配置，也不接受任意 HID 原始字节。
+每页都可以重新读取设备配置、临时应用到 RAM、应用并保存到 Flash，或恢复固件内置默认
+值。恢复默认只写入设备 RAM，成功后会立即回读；仍需点击“应用并保存到 Flash”才会永久
+保存。Touch 页可在 Mai2Touch 协议输出与 RAW 原始数据输出之间切换；模式选择不会自动
+写入设备，也不会重置 PSoC。
+
+窗口顶部可以导入或导出完整配置。导出文件使用 UTF-8 JSON 和
+`TenoDX_config_YYYYMMDD_HHMMSS.tenodx.json` 文件名，包含当前界面草稿中的 Touch、LED
+和按键配置。导入要求三个配置部分完整且格式版本兼容，只更新界面草稿，不会自动写入
+设备；确认内容后仍需逐页应用或保存。导入导出会原样保留 `0x00`-`0xFF` 范围内的未知
+EK HID 字节。
 
 自动探测兼容的 Aime/Magic 串口：
 
@@ -130,9 +147,9 @@ python main.py dfu --help
 四个 32 位单文件程序输出到 `dist/`。综合版和 DFU 版保留控制台；Test 与 Config
 独立版为无控制台窗口程序。综合版通过 `test`、`dfu`、`config` 子命令选择功能。
 
-脚本还会生成可直接分发的 `release/`，包含四个 EXE、共享的 `firmware/`、使用说明和
-第三方许可证。综合版和 DFU 独立版只读取 EXE 同级 `firmware/` 中严格时间戳命名的
-固件；添加或替换固件后无需重新打包 EXE。
+脚本还会生成可直接分发的 `release/`，包含四个 EXE、共享的 `firmware/`、独立的
+`DFU-driver/`、使用说明和第三方许可证。综合版和 DFU 独立版只读取 EXE 同级
+`firmware/` 中严格时间戳命名的固件；添加或替换固件后无需重新打包 EXE。
 
 ## 目录结构
 
@@ -142,6 +159,7 @@ TenoDXConfigurationTool/
 ├─ tenodx_config/          应用端：配置流程、设备协议与综合测试界面
 ├─ images/                 触摸区域与 BTN1-BTN8 实时显示素材
 ├─ DFU/                    独立刷写组件及 Windows x64 dfu-util
+│  └─ driver/             ST 签名的 STM32 Bootloader WinUSB 驱动及安装脚本
 ├─ firmware/               时间戳 BIN 固件目录（初始为空）
 ├─ tests/
 └─ THIRD_PARTY_NOTICES.md
