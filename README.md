@@ -151,6 +151,19 @@ python main.py dfu --help
 `DFU-driver/`、使用说明和第三方许可证。综合版和 DFU 独立版只读取 EXE 同级
 `firmware/` 中严格时间戳命名的固件；添加或替换固件后无需重新打包 EXE。
 
+仓库的 **Build Windows release** GitHub Actions 工作流会自动完成以下步骤：
+
+1. 从 `snmqwq/TenoDXController-H503` 的 `main` 构建 Release 固件。
+2. 在 32 位 Python 3.11 环境运行 Ruff 和全部单元测试。
+3. 生成四个 32 位 Windows EXE，并和固件、驱动、说明及许可证一起压缩。
+
+推送到 `main`、创建面向 `main` 的 Pull Request 或手动运行工作流时，完整 ZIP
+会保存为运行结果中的 Artifact，保留 30 天。手动运行时可以通过 `firmware_ref`
+指定固件仓库的分支、标签或提交号。
+
+推送 `v*` 标签（例如 `v1.0.0`）时，同一份 ZIP 还会自动发布到 GitHub Release；
+该流程只使用仓库自带的 `GITHUB_TOKEN`，不需要额外配置 PAT 或 Secret。
+
 ## 目录结构
 
 ```text

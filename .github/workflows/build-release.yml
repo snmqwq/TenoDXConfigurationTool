@@ -1,0 +1,193 @@
+name: Build Windows release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      firmware_ref:
+        description: Firmware branch, tag, or commit
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARM_TOOLCHAIN_URL: https://developer.arm.com/-/media/Files/downloads/gnu/13.3.rel1/binrel/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi.tar.xz
+
+jobs:
+  firmware:
+    name: Build Release firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out firmware source
+        uses: actions/checkout@v6
+        with:
+          repository: snmqwq/TenoDXController-H503
+          ref: ${{ inputs.firmware_ref || 'main' }}
+          path: firmware-source
+          persist-credentials: false
+
+      - name: Install Arm GNU Toolchain 13.3.Rel1
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 "$ARM_TOOLCHAIN_URL" \
+            --output "$RUNNER_TEMP/arm-toolchain.tar.xz"
+          mkdir -p "$RUNNER_TEMP/arm-toolchain"
+          tar -xf "$RUNNER_TEMP/arm-toolchain.tar.xz" \
+            -C "$RUNNER_TEMP/arm-toolchain"
+          toolchain_dir="$(find "$RUNNER_TEMP/arm-toolchain" \
+            -mindepth 1 -maxdepth 1 -type d \
+            -name 'arm-gnu-toolchain-*' -print -quit)"
+          test -n "$toolchain_dir"
+          echo "$toolchain_dir/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Release firmware
+        run: >-
+          cmake -S firmware-source -B firmware-source/build/action
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake
+
+      - name: Build Release firmware
+        run: cmake --build firmware-source/build/action --parallel
+
+      - name: Prepare firmware for packaging
+        shell: bash
+        run: |
+          stamp="$(date -u +%Y%m%d_%H%M%S)"
+          mkdir -p firmware-output
+          cp firmware-source/build/action/maimai_controller_H503.bin \
+            "firmware-output/maimai_controller_H503_${stamp}.bin"
+          git -C firmware-source rev-parse HEAD \
+            > firmware-output/firmware-source-sha.txt
+
+      - name: Upload firmware for Windows packaging
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-for-release
+          path: firmware-output/
+          if-no-files-found: error
+          retention-days: 1
+
+  package:
+    name: Test and package 32-bit Windows tools
+    needs: firmware
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out configuration tool
+        uses: actions/checkout@v6
+
+      - name: Set up 32-bit Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          architecture: x86
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: Run Ruff
+        run: python -m ruff check tenodx_config tests
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Download Release firmware
+        uses: actions/download-artifact@v8
+        with:
+          name: firmware-for-release
+          path: action-firmware
+
+      - name: Install firmware into package input
+        shell: pwsh
+        run: |
+          Get-ChildItem firmware -Filter "maimai_controller_H503_*.bin" `
+            -File -ErrorAction SilentlyContinue | Remove-Item -Force
+          $firmware = @(Get-ChildItem action-firmware `
+            -Filter "maimai_controller_H503_*.bin" -File)
+          if ($firmware.Count -ne 1) {
+            throw "Expected exactly one firmware BIN, found $($firmware.Count)."
+          }
+          Copy-Item $firmware[0].FullName firmware\
+
+      - name: Build all Windows executables
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          .\packaging\build_all.ps1 -Python (Get-Command python).Source
+
+      - name: Add firmware revision and create archive
+        id: archive
+        shell: pwsh
+        run: |
+          Copy-Item action-firmware\firmware-source-sha.txt `
+            release\FIRMWARE_SOURCE_SHA.txt
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
+            $archiveName = "TenoDX-$env:GITHUB_REF_NAME.zip"
+          } else {
+            $archiveName = "TenoDX-ci-$env:GITHUB_RUN_NUMBER.zip"
+          }
+          $archivePath = Join-Path $PWD $archiveName
+          Compress-Archive -Path release\* -DestinationPath $archivePath
+          "archive_path=$archiveName" >> $env:GITHUB_OUTPUT
+          "archive_name=$archiveName" >> $env:GITHUB_OUTPUT
+
+      - name: Upload complete release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: TenoDX-release-bundle
+          path: ${{ steps.archive.outputs.archive_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish tagged release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: TenoDX-release-bundle
+          path: release-download
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          shopt -s nullglob
+          archives=(release-download/*.zip)
+          test "${#archives[@]}" -eq 1
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${archives[0]}" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "${archives[0]}" \
+              --verify-tag \
+              --generate-notes \
+              --title "TenoDX $GITHUB_REF_NAME"
+          fi

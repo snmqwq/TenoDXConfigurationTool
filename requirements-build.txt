@@ -1,0 +1,5 @@
+-r requirements.txt
+
+PyInstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
+ruff==0.16.1
