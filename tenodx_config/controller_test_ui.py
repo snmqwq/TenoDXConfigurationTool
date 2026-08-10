@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -42,6 +43,8 @@ TOUCH_START_DELAY_SECONDS = 0.1
 TOUCH_TIMEOUT_SECONDS = 0.5
 FIRST_TOUCH_FRAME_TIMEOUT_SECONDS = 1.0
 TOUCH_POLL_INTERVAL_MS = 10
+TOUCH_REPORT_RATE_WINDOW_SECONDS = 1.0
+TOUCH_REPORT_RATE_DISPLAY_INTERVAL_SECONDS = 0.25
 RAW_INPUT_POLL_INTERVAL_MS = 12
 HOTPLUG_REFRESH_DELAY_MS = 200
 WORKER_EVENT_POLL_INTERVAL_MS = 30
@@ -263,6 +266,9 @@ class ControllerTestWindow:
         self.last_valid_touch_frame_at: float | None = None
         self.first_touch_frame_deadline: float | None = None
         self.touch_timed_out = False
+        self.touch_report_rate_samples: deque[tuple[float, int]] = deque()
+        self.touch_report_rate_started_at: float | None = None
+        self.next_touch_report_rate_display_at: float | None = None
         self.current_touch_bits = -1
 
         self.button_state = MainButtonState()
@@ -323,6 +329,7 @@ class ControllerTestWindow:
         self.aime_status_var = tk.StringVar(value="未连接")
 
         self.touch_state_var = tk.StringVar(value="触摸：无")
+        self.touch_report_rate_var = tk.StringVar(value="回报率：—")
         self.button_state_var = tk.StringVar(value="主按键：无")
         self.aime_firmware_var = tk.StringVar(value="—")
         self.aime_hardware_var = tk.StringVar(value="—")
@@ -475,8 +482,14 @@ class ControllerTestWindow:
         left.columnconfigure(0, weight=1)
         self.image_label = ttk.Label(left, anchor="center")
         self.image_label.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(left, textvariable=self.touch_state_var).grid(
-            row=1, column=0, pady=(8, 0), sticky="w"
+        touch_state_row = ttk.Frame(left)
+        touch_state_row.grid(row=1, column=0, pady=(8, 0), sticky="ew")
+        touch_state_row.columnconfigure(0, weight=1)
+        ttk.Label(touch_state_row, textvariable=self.touch_state_var).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(touch_state_row, textvariable=self.touch_report_rate_var).grid(
+            row=0, column=1, padx=(12, 0), sticky="e"
         )
         ttk.Label(left, textvariable=self.button_state_var).grid(
             row=2, column=0, pady=(5, 0), sticky="w"
@@ -834,10 +847,10 @@ class ControllerTestWindow:
         self.touch_port_name = selected.device
         self.touch_parser.reset()
         self.last_valid_touch_frame_at = None
-        self.first_touch_frame_deadline = (
-            self.clock() + FIRST_TOUCH_FRAME_TIMEOUT_SECONDS
-        )
+        now = self.clock()
+        self.first_touch_frame_deadline = now + FIRST_TOUCH_FRAME_TIMEOUT_SECONDS
         self.touch_timed_out = False
+        self._reset_touch_report_rate(now)
         self._show_state(0, self.current_button_mask)
         self._set_touch_status("等待状态帧", "#1565C0")
         self._update_module_widgets()
@@ -856,6 +869,7 @@ class ControllerTestWindow:
         self.last_valid_touch_frame_at = None
         self.first_touch_frame_deadline = None
         self.touch_timed_out = False
+        self._reset_touch_report_rate()
         self._show_state(0, self.current_button_mask)
         self._set_touch_status("未连接", "#C62828")
         self._update_module_widgets()
@@ -884,11 +898,17 @@ class ControllerTestWindow:
         now = self.clock()
         states = self.touch_parser.feed(data) if data else []
         if states:
+            first_frame = self.last_valid_touch_frame_at is None
+            if self.touch_timed_out:
+                self._reset_touch_report_rate(now)
             self.last_valid_touch_frame_at = now
             self.first_touch_frame_deadline = None
             self.touch_timed_out = False
+            self.touch_report_rate_samples.append((now, len(states)))
             self._show_state(states[-1], self.current_button_mask)
-            self._set_touch_status("运行中", "#2E7D32")
+            self._update_touch_report_rate_status(
+                now, force=first_frame or self.touch_report_rate_started_at == now
+            )
         elif self.last_valid_touch_frame_at is None:
             deadline = self.first_touch_frame_deadline
             if deadline is not None and now >= deadline:
@@ -897,9 +917,55 @@ class ControllerTestWindow:
         elif now - self.last_valid_touch_frame_at >= TOUCH_TIMEOUT_SECONDS:
             if not self.touch_timed_out:
                 self.touch_timed_out = True
+                self._reset_touch_report_rate()
                 self._show_state(0, self.current_button_mask)
                 self._set_touch_status("数据超时，等待恢复", "#EF6C00")
+        elif not self.touch_timed_out:
+            self._update_touch_report_rate_status(now)
         self._schedule_touch_poll()
+
+    def _reset_touch_report_rate(self, now: float | None = None) -> None:
+        self.touch_report_rate_samples.clear()
+        self.touch_report_rate_started_at = now
+        self.touch_report_rate_var.set("回报率：—")
+        self.next_touch_report_rate_display_at = (
+            None
+            if now is None
+            else now + TOUCH_REPORT_RATE_DISPLAY_INTERVAL_SECONDS
+        )
+
+    def _update_touch_report_rate_status(
+        self, now: float, *, force: bool = False
+    ) -> None:
+        next_display = self.next_touch_report_rate_display_at
+        if not force and next_display is not None and now < next_display:
+            return
+
+        cutoff = now - TOUCH_REPORT_RATE_WINDOW_SECONDS
+        while (
+            self.touch_report_rate_samples
+            and self.touch_report_rate_samples[0][0] <= cutoff
+        ):
+            self.touch_report_rate_samples.popleft()
+
+        started_at = self.touch_report_rate_started_at
+        elapsed = (
+            0.0
+            if started_at is None
+            else min(TOUCH_REPORT_RATE_WINDOW_SECONDS, max(0.0, now - started_at))
+        )
+        if elapsed < TOUCH_REPORT_RATE_DISPLAY_INTERVAL_SECONDS:
+            rate_text = "回报率：统计中"
+        else:
+            frame_count = sum(
+                count for _timestamp, count in self.touch_report_rate_samples
+            )
+            rate_text = f"回报率：{frame_count / elapsed:.1f} Hz"
+        self.touch_report_rate_var.set(rate_text)
+        self._set_touch_status("运行中", "#2E7D32")
+        self.next_touch_report_rate_display_at = (
+            now + TOUCH_REPORT_RATE_DISPLAY_INTERVAL_SECONDS
+        )
 
     def _handle_touch_error(self, reason: str) -> None:
         self.disconnect_touch(refresh=True)

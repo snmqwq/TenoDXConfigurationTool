@@ -358,6 +358,15 @@ class WindowSelectionSmokeTests(unittest.TestCase):
             app._poll_touch_serial()
             self.assertEqual(app.current_touch_bits, active_touch)
             self.assertEqual(app.touch_state_var.get(), "触摸：A1 C2 E8")
+            self.assertEqual(app.touch_status_var.get(), "运行中")
+            self.assertEqual(app.touch_report_rate_var.get(), "回报率：统计中")
+
+            now[0] += 0.25
+            device.feed(encode_touch_frame(active_touch) * 62)
+            app._cancel_after("touch_poll_after_id")
+            app._poll_touch_serial()
+            self.assertEqual(app.touch_status_var.get(), "运行中")
+            self.assertEqual(app.touch_report_rate_var.get(), "回报率：252.0 Hz")
 
             now[0] += 0.5
             app._cancel_after("touch_poll_after_id")
@@ -365,6 +374,7 @@ class WindowSelectionSmokeTests(unittest.TestCase):
             self.assertTrue(app.connected)
             self.assertEqual(app.current_touch_bits, 0)
             self.assertIn("超时", app.touch_status_var.get())
+            self.assertEqual(app.touch_report_rate_var.get(), "回报率：—")
 
             now[0] += 0.1
             device.feed(encode_touch_frame(1 << 1))
@@ -372,6 +382,8 @@ class WindowSelectionSmokeTests(unittest.TestCase):
             app._poll_touch_serial()
             self.assertEqual(app.current_touch_bits, 1 << 1)
             self.assertEqual(app.touch_status_var.get(), "运行中")
+            self.assertEqual(app.touch_report_rate_var.get(), "回报率：统计中")
+            self.assertEqual(list(app.touch_report_rate_samples), [(now[0], 1)])
 
             monitor.events.put(
                 RawKeyboardEvent(
