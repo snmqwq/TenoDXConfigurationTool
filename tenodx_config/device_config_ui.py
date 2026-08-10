@@ -75,6 +75,19 @@ PSOC_STATUS_NAMES = {
     0xFF: "未知",
 }
 
+
+def _psoc_firmware_text(*, state: int, connected: bool, flags: int) -> str:
+    if flags & PSOC_STATUS_FLAG_SOFT_RESET_SUPPORTED:
+        return "新版（支持软复位）"
+    if flags & PSOC_STATUS_FLAG_LEGACY_FIRMWARE:
+        return "旧版（需断电重启）"
+    if connected and state != 6:
+        return "识别中"
+    if connected:
+        return "未知（识别失败）"
+    return "无法识别（未连接）"
+
+
 ConfigPage = Literal["touch", "led", "keyboard"]
 
 
@@ -1099,12 +1112,11 @@ class DeviceConfigWindow:
                 raw_text = "无有效数据"
                 age_text = "未知"
 
-            if device.flags & PSOC_STATUS_FLAG_SOFT_RESET_SUPPORTED:
-                firmware_text = "新版（支持软复位）"
-            elif device.flags & PSOC_STATUS_FLAG_LEGACY_FIRMWARE:
-                firmware_text = "旧版（需断电重启）"
-            else:
-                firmware_text = "未知"
+            firmware_text = _psoc_firmware_text(
+                state=status.state,
+                connected=connected,
+                flags=device.flags,
+            )
 
             if power_cycle:
                 config_text = "需要断电重连后应用"

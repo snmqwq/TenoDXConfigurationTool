@@ -33,6 +33,7 @@ from tenodx_config.device_config import (
 )
 from tenodx_config.device_config_ui import (
     DeviceConfigWindow,
+    _psoc_firmware_text,
     serial_port_label,
 )
 
@@ -89,6 +90,38 @@ def make_runtime_status() -> TouchRuntimeStatus:
             ),
         ),
     )
+
+
+class PsocFirmwareTextTests(unittest.TestCase):
+    def test_reports_detection_progress_before_running(self) -> None:
+        self.assertEqual(
+            _psoc_firmware_text(
+                state=5,
+                connected=True,
+                flags=PSOC_STATUS_FLAG_CONNECTED | PSOC_STATUS_FLAG_VALID,
+            ),
+            "识别中",
+        )
+
+    def test_reports_failed_detection_only_after_running(self) -> None:
+        self.assertEqual(
+            _psoc_firmware_text(
+                state=6,
+                connected=True,
+                flags=(
+                    PSOC_STATUS_FLAG_CONNECTED
+                    | PSOC_STATUS_FLAG_OPERATIONAL
+                    | PSOC_STATUS_FLAG_VALID
+                ),
+            ),
+            "未知（识别失败）",
+        )
+
+    def test_reports_disconnected_device_separately(self) -> None:
+        self.assertEqual(
+            _psoc_firmware_text(state=6, connected=False, flags=0),
+            "无法识别（未连接）",
+        )
 
 
 class FakeController:
