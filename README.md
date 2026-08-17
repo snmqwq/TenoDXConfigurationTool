@@ -7,7 +7,7 @@ Aime 和 Mai2LED 的协议测试。
 
 ```text
 选择严格时间戳命名的固件
-  -> 验证 TenoDX Aime/Magic 串口
+  -> 验证 TenoDX Debug/Magic 串口
   -> 发送 Magic ENTER_DFU 命令
   -> 等待新的 0483:DF11，并取得 USB 序列号
   -> 把 VID:PID、USB 序列号、固件路径传给 DFU 组件
@@ -86,8 +86,8 @@ Mai2LED 返回 ACK 只代表协议通信成功，不能代替对灯珠是否实�
 python main.py config
 ```
 
-配置窗口通过 Aime/Magic 使用的同一路 CDC2 串口通信，因此不能与综合测试界面的 Aime
-读卡功能同时连接。窗口包含三个配置页：
+配置窗口通过独立的 Debug/Magic CDC3 串口通信；综合测试界面的 Aime 读卡功能使用
+CDC2，两者可以同时连接。Debug 串口只承载 Magic 二进制协议，不输出文本日志。窗口包含三个配置页：
 
 - Touch：为物理通道 `0`-`33` 分别选择一个逻辑区块（`A1`-`A8`、`B1`-`B8`、
   `C1`-`C2`、`D1`-`D8`、`E1`-`E8`）。同一区块允许被多个通道复用，扫描 Block
@@ -110,7 +110,7 @@ python main.py config
 设备；确认内容后仍需逐页应用或保存。导入导出会原样保留 `0x00`-`0xFF` 范围内的未知
 EK HID 字节。
 
-自动探测兼容的 Aime/Magic 串口：
+自动探测兼容的 Debug/Magic 串口：
 
 ```powershell
 python main.py dfu

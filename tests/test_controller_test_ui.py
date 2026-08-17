@@ -321,10 +321,13 @@ class WindowSelectionSmokeTests(unittest.TestCase):
                 clock=lambda: now[0],
             )
             root.update_idletasks()
-            self.assertEqual(app.touch_port_var.get(), "")
+            self.assertIn("TenoDX Touch", app.touch_port_var.get())
             self.assertEqual(app.keyboard_var.get(), "")
             self.assertEqual(app.led_port_var.get(), "")
             self.assertEqual(app.aime_port_var.get(), "")
+            self.assertFalse(app.connected)
+            self.assertFalse(app.touch_connected)
+            self.assertEqual(serial_devices, [])
 
             touch_labels = app.touch_port_combo.cget("values")
             keyboard_labels = app.keyboard_combo.cget("values")
@@ -343,7 +346,6 @@ class WindowSelectionSmokeTests(unittest.TestCase):
                 any("总线已报告设备描述：" in item for item in keyboard_labels)
             )
 
-            app.touch_port_var.set(next(iter(app.serial_ports_by_label)))
             app.keyboard_var.set(next(iter(app.keyboards_by_label)))
             app.connect()
             self.assertTrue(app.connected)
@@ -421,6 +423,89 @@ class WindowSelectionSmokeTests(unittest.TestCase):
             else:
                 root.destroy()
         self.assertTrue(monitor.closed)
+
+    def test_unique_tenodx_test_ports_are_selected_without_connecting(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"Tk is unavailable: {error}")
+        root.withdraw()
+
+        ports = [
+            SimpleNamespace(
+                device=f"COM{number}",
+                description="USB Serial Device",
+                serial_number="UID-123",
+                vid=0x0483,
+                pid=0x5740,
+            )
+            for number in (7, 8, 9)
+        ]
+        app: ControllerTestWindow | None = None
+        try:
+            app = ControllerTestWindow(
+                root,
+                port_provider=lambda: ports,
+                keyboard_provider=lambda: [],
+                bus_description_provider=lambda: {
+                    "com7": "TenoDX Touch Port",
+                    "com8": "TenoDX LED Port",
+                    "com9": "TenoDX Aime Port",
+                },
+                monitor_factory=FakeMonitor,  # type: ignore[arg-type]
+            )
+            root.update_idletasks()
+
+            self.assertIn("TenoDX Touch Port", app.touch_port_var.get())
+            self.assertIn("TenoDX LED Port", app.led_port_var.get())
+            self.assertIn("TenoDX Aime Port", app.aime_port_var.get())
+            self.assertFalse(app.touch_connected)
+            self.assertIsNone(app.led_handle)
+            self.assertIsNone(app.aime_handle)
+        finally:
+            if app is not None:
+                app.close()
+            else:
+                root.destroy()
+
+    def test_duplicate_tenodx_test_function_is_not_auto_selected(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"Tk is unavailable: {error}")
+        root.withdraw()
+
+        ports = [
+            SimpleNamespace(
+                device=f"COM{number}",
+                description="USB Serial Device",
+                serial_number=f"UID-{number}",
+                vid=0x0483,
+                pid=0x5740,
+            )
+            for number in (7, 8)
+        ]
+        app: ControllerTestWindow | None = None
+        try:
+            app = ControllerTestWindow(
+                root,
+                port_provider=lambda: ports,
+                keyboard_provider=lambda: [],
+                bus_description_provider=lambda: {
+                    "com7": "TenoDX Touch Port",
+                    "com8": "TenoDX Touch Port",
+                },
+                monitor_factory=FakeMonitor,  # type: ignore[arg-type]
+            )
+            root.update_idletasks()
+
+            self.assertEqual(app.touch_port_var.get(), "")
+            self.assertFalse(app.touch_connected)
+        finally:
+            if app is not None:
+                app.close()
+            else:
+                root.destroy()
 
 
 class CombinedModuleTests(unittest.TestCase):

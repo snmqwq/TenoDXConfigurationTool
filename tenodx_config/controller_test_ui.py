@@ -30,6 +30,7 @@ from .raw_keyboard import (
     list_raw_keyboard_devices,
     list_serial_bus_descriptions,
 )
+from .serial_identity import matches_tenodx_serial_function
 from .touch_protocol import (
     RSET_COMMAND,
     STAT_COMMAND,
@@ -671,18 +672,45 @@ class ControllerTestWindow:
 
         self.serial_ports_by_label.clear()
         labels_by_port: dict[str, str] = {}
+        auto_labels: dict[str, list[str]] = {
+            "touch": [],
+            "led": [],
+            "aime": [],
+        }
         for port in ports:
-            label = serial_port_label(
-                port, bus_descriptions.get(port.device.casefold())
-            )
+            bus_description = bus_descriptions.get(port.device.casefold())
+            label = serial_port_label(port, bus_description)
             self.serial_ports_by_label[label] = port
             labels_by_port[port.device.casefold()] = label
+            for function_name in auto_labels:
+                if matches_tenodx_serial_function(
+                    port, bus_description, function_name
+                ):
+                    auto_labels[function_name].append(label)
         port_values = ("", *self.serial_ports_by_label)
-        for (combo, variable, active), old_name in zip(
+        retained_labels = {
+            labels_by_port[name.casefold()]
+            for name in old_port_names
+            if name and name.casefold() in labels_by_port
+        }
+        selected_labels = set(retained_labels)
+        automatically_selected = False
+        for (function_name, combo, variable, active), old_name in zip(
             (
-                (self.touch_port_combo, self.touch_port_var, self.touch_connected),
-                (self.led_port_combo, self.led_port_var, self.led_handle is not None),
                 (
+                    "touch",
+                    self.touch_port_combo,
+                    self.touch_port_var,
+                    self.touch_connected,
+                ),
+                (
+                    "led",
+                    self.led_port_combo,
+                    self.led_port_var,
+                    self.led_handle is not None,
+                ),
+                (
+                    "aime",
                     self.aime_port_combo,
                     self.aime_port_var,
                     self.aime_handle is not None,
@@ -696,7 +724,14 @@ class ControllerTestWindow:
             if replacement:
                 variable.set(replacement)
             elif not active:
-                variable.set("")
+                matches = auto_labels[function_name]
+                candidate = matches[0] if len(matches) == 1 else ""
+                if candidate and candidate not in selected_labels:
+                    variable.set(candidate)
+                    selected_labels.add(candidate)
+                    automatically_selected = True
+                else:
+                    variable.set("")
 
         self.keyboards_by_label.clear()
         selected_keyboard_label = ""
@@ -721,6 +756,10 @@ class ControllerTestWindow:
                 messagebox.showerror("设备刷新失败", "\n".join(errors))
         elif self.monitor.error and not self.hid_connected:
             self._set_keyboard_status(self.monitor.error, "#C62828")
+        elif automatically_selected:
+            self._set_status(
+                "已自动选择可识别的 TenoDX 串口，请手动连接", "#455A64"
+            )
         else:
             self._set_status("设备列表已刷新，请明确选择需要测试的设备", "#455A64")
 

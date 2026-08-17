@@ -77,7 +77,7 @@ def select_item(
 def select_magic_port(ports: Iterable[MagicPort]) -> MagicPort:
     return select_item(
         ports,
-        title="兼容的 TenoDX Aime/Magic 串口",
+        title="兼容的 TenoDX Debug/Magic 串口",
         describe=lambda port: "  ".join(
             part for part in (port.device, port.description, port.usb_serial) if part
         ),
@@ -103,11 +103,11 @@ def run_dfu_update(args: argparse.Namespace) -> int:
     firmware = resolve_firmware(args.firmware)
     print(f"固件: {firmware.name}")
 
-    print("[1/6] 正在执行刷写前检查并验证 TenoDX Aime/Magic 串口...")
+    print("[1/6] 正在执行刷写前检查并验证 TenoDX Debug/Magic 串口...")
     magic_ports = discover_magic_ports(args.port)
     if not magic_ports:
         target = f" {args.port}" if args.port else ""
-        raise CliError(f"未找到兼容的 TenoDX Aime/Magic 串口{target}。")
+        raise CliError(f"未找到兼容的 TenoDX Debug/Magic 串口{target}。")
     selected_magic = select_magic_port(magic_ports)
     other_magic = [port for port in magic_ports if port != selected_magic]
     print(f"应用设备: {selected_magic.device}")
@@ -197,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     dfu = subparsers.add_parser("dfu", help="进入 DFU、选择固件并更新主控")
-    dfu.add_argument("--port", help="指定应用模式的 Aime/Magic 串口，例如 COM7")
+    dfu.add_argument("--port", help="指定应用模式的 Debug/Magic 串口，例如 COM7")
     dfu.add_argument(
         "--device-id", default=DEFAULT_DEVICE_ID, help="DFU VID:PID，默认 0483:DF11"
     )

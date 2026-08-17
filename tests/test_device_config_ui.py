@@ -239,8 +239,8 @@ class DeviceConfigUiHelpersTests(unittest.TestCase):
             vid=0x0483,
             pid=0x5740,
         )
-        label = serial_port_label(port, "TenoDX Aime")
-        self.assertIn("COM12 | TenoDX Aime", label)
+        label = serial_port_label(port, "TenoDX Debug")
+        self.assertIn("COM12 | TenoDX Debug", label)
         self.assertIn("VID 0483", label)
         self.assertIn("PID 5740", label)
         self.assertNotIn("总线已报告设备描述：", label)
@@ -278,7 +278,7 @@ class DeviceConfigWindowTests(unittest.TestCase):
             pid=0x5740,
         )
 
-    def test_manual_connect_does_not_write_and_worker_never_updates_tk(self) -> None:
+    def test_auto_select_does_not_connect_and_worker_never_updates_tk(self) -> None:
         root = self._root()
         controllers: list[FakeController] = []
         main_thread = threading.get_ident()
@@ -295,7 +295,7 @@ class DeviceConfigWindowTests(unittest.TestCase):
                 root,
                 controller_factory=factory,
                 port_provider=lambda: [self._port()],
-                bus_description_provider=lambda: {"com12": "TenoDX Aime"},
+                bus_description_provider=lambda: {"com12": "TenoDX Debug"},
             )
             original_load_snapshot = app._load_snapshot
 
@@ -305,10 +305,12 @@ class DeviceConfigWindowTests(unittest.TestCase):
 
             app._load_snapshot = record_load  # type: ignore[method-assign]
             root.update_idletasks()
-            self.assertEqual(app.port_var.get(), "")
+            self.assertIn("TenoDX Debug", app.port_var.get())
             self.assertEqual(len(app.port_combo.cget("values")), 1)
+            self.assertFalse(app.connected)
+            self.assertFalse(app.connecting)
+            self.assertEqual(controllers, [])
 
-            app.port_var.set(next(iter(app.serial_ports_by_label)))
             self.assertTrue(app.connect())
             wait_for_tk(root, lambda: app.connected)
 
@@ -332,6 +334,39 @@ class DeviceConfigWindowTests(unittest.TestCase):
             )
             self.assertEqual(app.led_dirty_var.get(), "已与设备同步")
             self.assertEqual(app.keyboard_dirty_var.get(), "已与设备同步")
+        finally:
+            if app is not None:
+                app.close()
+            else:
+                root.destroy()
+
+    def test_multiple_debug_ports_are_not_auto_selected(self) -> None:
+        root = self._root()
+        ports = [
+            self._port(),
+            SimpleNamespace(
+                device="COM13",
+                description="USB Serial Device",
+                serial_number="UID-13",
+                vid=0x0483,
+                pid=0x5740,
+            ),
+        ]
+        app: DeviceConfigWindow | None = None
+        try:
+            app = DeviceConfigWindow(
+                root,
+                port_provider=lambda: ports,
+                bus_description_provider=lambda: {
+                    "com12": "TenoDX Debug Port",
+                    "com13": "TenoDX Debug Port",
+                },
+            )
+            root.update_idletasks()
+
+            self.assertEqual(app.port_var.get(), "")
+            self.assertFalse(app.connected)
+            self.assertFalse(app.connecting)
         finally:
             if app is not None:
                 app.close()

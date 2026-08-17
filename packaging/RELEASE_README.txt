@@ -12,7 +12,7 @@ TenoDX Configuration Tool 使用说明
   TenoDXDFU.exe             在管理员命令行中运行完整 DFU 流程
 
 配置导入导出：
-  先连接 Aime / Magic 串口并读取设备配置。
+  先连接 Debug / Magic 串口并读取设备配置。
   “导出配置”保存当前界面中的 Touch、LED 和按键草稿。
   “导入配置”只载入界面草稿，不会自动写入设备。
   每页“恢复默认”只临时应用到 RAM；需要永久保存时再点击“应用并保存到 Flash”。

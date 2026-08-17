@@ -166,7 +166,7 @@ def verify_magic_client(client: MagicClient) -> None:
     if not response.ok:
         raise MagicError(f"串口响应了 Magic 协议，但状态为 0x{response.status:02X}。")
     if not LIGHT_INFO_PARAMS.issubset(response.payload):
-        raise MagicError("串口响应了 Magic 协议，但不是兼容的 TenoDX Aime/Magic 端口。")
+        raise MagicError("串口响应了 Magic 协议，但不是兼容的 TenoDX Debug/Magic 端口。")
 
 
 def probe_magic_port(port: MagicPort, timeout: float = 0.6) -> bool:
@@ -178,9 +178,11 @@ def probe_magic_port(port: MagicPort, timeout: float = 0.6) -> bool:
         return False
 
 
-def _port_sort_key(port: MagicPort) -> tuple[int, str]:
+def _port_sort_key(port: MagicPort) -> tuple[int, int, str]:
+    debug_priority = 0 if "debug" in port.description.casefold() else 1
     match = re.fullmatch(r"COM(\d+)", port.device, re.IGNORECASE)
-    return (int(match.group(1)), port.device) if match else (2**31 - 1, port.device)
+    port_number = int(match.group(1)) if match else 2**31 - 1
+    return (debug_priority, port_number, port.device)
 
 
 def list_serial_ports() -> list[MagicPort]:

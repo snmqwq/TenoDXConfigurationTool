@@ -65,7 +65,7 @@ class DfuWorkflowTests(unittest.TestCase):
         self.assertEqual(result, 0)
         preflight.assert_called_once_with()
         output.assert_any_call(
-            "[1/6] 正在执行刷写前检查并验证 TenoDX Aime/Magic 串口..."
+            "[1/6] 正在执行刷写前检查并验证 TenoDX Debug/Magic 串口..."
         )
         output.assert_any_call("正在记录进入 DFU 前的设备基线...")
         enter.assert_called_once_with(magic)

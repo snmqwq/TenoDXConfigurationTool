@@ -47,6 +47,7 @@ from .device_config import (
     main_keycodes_for_layout,
 )
 from .raw_keyboard import list_serial_bus_descriptions
+from .serial_identity import matches_tenodx_serial_function
 
 WORKER_EVENT_POLL_INTERVAL_MS = 30
 TOUCH_STATUS_POLL_INTERVAL_MS = 500
@@ -135,7 +136,7 @@ def serial_port_label(port: Any, bus_description: str | None) -> str:
 
 
 class DeviceConfigWindow:
-    """Edit Touch, LED, and keyboard settings through one Magic serial port."""
+    """Edit Touch, LED, and keyboard settings through the Debug/Magic port."""
 
     def __init__(
         self,
@@ -169,7 +170,7 @@ class DeviceConfigWindow:
 
         self.serial_ports_by_label: dict[str, Any] = {}
         self.port_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="请选择 Aime / Magic 串口")
+        self.status_var = tk.StringVar(value="请选择 Debug / Magic 串口")
 
         self.snapshot: DeviceConfigSnapshot | None = None
         self.imported_pending: set[ConfigPage] = set()
@@ -238,7 +239,7 @@ class DeviceConfigWindow:
         connection = ttk.LabelFrame(outer, text="配置连接", padding=10)
         connection.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         connection.columnconfigure(1, weight=1)
-        ttk.Label(connection, text="Aime / Magic 串口").grid(
+        ttk.Label(connection, text="Debug / Magic 串口").grid(
             row=0, column=0, padx=(0, 8), sticky="e"
         )
         self.port_combo = ttk.Combobox(
@@ -621,7 +622,7 @@ class DeviceConfigWindow:
         )
 
     def refresh_devices(self, show_error: bool = True) -> None:
-        """Refresh serial labels while retaining a still-present manual choice."""
+        """Refresh ports and select one uniquely identified Debug function."""
 
         if self.connected or self.connecting or self.disconnecting:
             return
@@ -641,22 +642,28 @@ class DeviceConfigWindow:
 
         self.serial_ports_by_label.clear()
         retained_label = ""
+        debug_labels: list[str] = []
         for port in ports:
             device = str(getattr(port, "device", ""))
             if not device:
                 continue
-            label = serial_port_label(port, descriptions.get(device.casefold()))
+            bus_description = descriptions.get(device.casefold())
+            label = serial_port_label(port, bus_description)
             self.serial_ports_by_label[label] = port
             if selected_name and device.casefold() == selected_name:
                 retained_label = label
+            if matches_tenodx_serial_function(port, bus_description, "debug"):
+                debug_labels.append(label)
         labels = tuple(self.serial_ports_by_label)
         self.port_combo.configure(values=labels)
-        # Never select a device solely because it is the only one present.
-        self.port_var.set(retained_label)
-        self._set_status(
-            f"已发现 {len(labels)} 个串口，请手动选择 Aime / Magic 端口",
-            "#455A64",
-        )
+        auto_label = debug_labels[0] if len(debug_labels) == 1 else ""
+        selected_label = retained_label or auto_label
+        self.port_var.set(selected_label)
+        if auto_label and not retained_label:
+            status = "已自动选择 TenoDX Debug Port，请手动连接"
+        else:
+            status = f"已发现 {len(labels)} 个串口，请手动选择 Debug / Magic 端口"
+        self._set_status(status, "#455A64")
 
     def toggle_connection(self) -> None:
         if self.connected or self.connecting:
@@ -673,7 +680,7 @@ class DeviceConfigWindow:
         if port is None:
             messagebox.showwarning(
                 "未选择设备",
-                "请手动选择 Aime / Magic 串口。",
+                "请手动选择 Debug / Magic 串口。",
                 parent=self.root,
             )
             return False
@@ -686,7 +693,7 @@ class DeviceConfigWindow:
         self.handle = handle
         self.connecting = True
         self.disconnecting = False
-        self._set_status("正在连接并读取配置（请确保 Aime 测试已断开）…", "#1565C0")
+        self._set_status("正在通过 Debug / Magic 串口连接并读取配置…", "#1565C0")
         thread = threading.Thread(
             target=self._worker_main,
             args=(handle,),
@@ -983,7 +990,7 @@ class DeviceConfigWindow:
     def _can_start_operation(self) -> bool:
         if not self.connected or self.handle is None:
             messagebox.showwarning(
-                "尚未连接", "请先连接 Aime / Magic 串口。", parent=self.root
+                "尚未连接", "请先连接 Debug / Magic 串口。", parent=self.root
             )
             return False
         return not self.operation_pending and not self.disconnecting

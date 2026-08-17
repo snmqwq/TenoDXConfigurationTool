@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from tenodx_config.magic import MagicError, build_magic_request, parse_magic_response
+from tenodx_config.magic import (
+    MagicError,
+    build_magic_request,
+    list_serial_ports,
+    parse_magic_response,
+)
 
 
 class MagicProtocolTests(unittest.TestCase):
@@ -27,6 +34,27 @@ class MagicProtocolTests(unittest.TestCase):
         self.assertEqual(frame[12:-1], payload)
         with self.assertRaisesRegex(MagicError, "248"):
             build_magic_request(0x10, 0x02, 0x03, payload + b"\x00")
+
+    def test_debug_port_is_probed_before_other_serial_functions(self) -> None:
+        ports = [
+            SimpleNamespace(
+                device="COM3",
+                description="TenoDX Aime Port",
+                serial_number="UID",
+                hwid="USB VID:PID=0483:5740",
+            ),
+            SimpleNamespace(
+                device="COM20",
+                description="TenoDX Debug Port",
+                serial_number="UID",
+                hwid="USB VID:PID=0483:5740",
+            ),
+        ]
+
+        with patch("tenodx_config.magic.list_ports.comports", return_value=ports):
+            discovered = list_serial_ports()
+
+        self.assertEqual([port.device for port in discovered], ["COM20", "COM3"])
 
 
 if __name__ == "__main__":
